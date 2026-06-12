@@ -44,6 +44,10 @@ class CallMetrics:
     # Prompt drift fingerprint (hash of template portion of the prompt)
     prompt_hash: str | None = None
 
+    # Mission attribution (runtime financial guardrail for agents)
+    mission_id: str | None = None
+    parent_call_id: str | None = None
+
     # Cache fields (populated on a cache hit; zero/None otherwise)
     cache_hit: bool = False
     cache_key: str | None = None          # first 8 chars of the SHA-256 key (log prefix)
@@ -81,4 +85,8 @@ class CallMetrics:
             d["optimization"] = self.optimization_report.to_dict()
         if self.policy_decisions:
             d["policy"] = list(self.policy_decisions)
+        if self.mission_id is not None:
+            d["mission_id"] = self.mission_id
+        if self.parent_call_id is not None:
+            d["parent_call_id"] = self.parent_call_id
         return d

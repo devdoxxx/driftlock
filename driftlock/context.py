@@ -42,3 +42,20 @@ def tag(**tags: str) -> Generator[None, None, None]:
 def get_active_tags() -> dict:
     """Return the tags currently active in this context (copy)."""
     return dict(_active_tags.get())
+
+
+def push_tags(**tags: str):
+    """
+    Imperatively attach ambient tags and return a reset token.
+
+    Lower-level counterpart to :func:`tag` for callers (like ``MissionContext``)
+    that manage their own enter/exit lifecycle. Always pair with
+    :func:`reset_tags` in a ``finally`` block.
+    """
+    merged = {**_active_tags.get(), **tags}
+    return _active_tags.set(merged)
+
+
+def reset_tags(token) -> None:
+    """Restore the ambient tags to the state captured by :func:`push_tags`."""
+    _active_tags.reset(token)

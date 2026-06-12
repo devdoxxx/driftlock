@@ -43,7 +43,12 @@ CREATE TABLE IF NOT EXISTS calls (
     optimization_enabled    INTEGER DEFAULT 0,
     optimization_shadow     INTEGER DEFAULT 0,
     sampled_out             INTEGER DEFAULT 0,
-    quality_regression      INTEGER DEFAULT 0
+    quality_regression      INTEGER DEFAULT 0,
+    -- mission attribution (runtime guardrails for agents)
+    mission_id              TEXT,
+    parent_call_id          TEXT,
+    record_type             TEXT DEFAULT 'call',
+    intervention_event      TEXT
 )
 """
 
@@ -54,7 +59,40 @@ CREATE INDEX IF NOT EXISTS idx_calls_model     ON calls(model);
 CREATE INDEX IF NOT EXISTS idx_calls_user_id   ON calls(user_id);
 CREATE INDEX IF NOT EXISTS idx_calls_team_id   ON calls(team_id);
 CREATE INDEX IF NOT EXISTS idx_calls_provider  ON calls(provider);
+CREATE INDEX IF NOT EXISTS idx_calls_mission   ON calls(mission_id);
 """
+
+# Mission lifecycle table — one row per mission, tracks running/completed/failed
+# status so a crashed process leaves a recoverable record (Phase 2).
+_CREATE_MISSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS missions (
+    mission_id          TEXT PRIMARY KEY,
+    name                TEXT,
+    budget_usd          REAL,
+    expected_calls      INTEGER,
+    on_exceed           TEXT,
+    downgrade_to        TEXT,
+    parent_mission_id   TEXT,
+    started_at          TEXT,
+    ended_at            TEXT,
+    status              TEXT DEFAULT 'running',
+    final_spent         REAL,
+    final_call_count    INTEGER,
+    nested_spent_usd    REAL
+)
+"""
+
+_CREATE_MISSIONS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_missions_started ON missions(started_at);
+CREATE INDEX IF NOT EXISTS idx_missions_status  ON missions(status);
+CREATE INDEX IF NOT EXISTS idx_missions_parent  ON missions(parent_mission_id);
+"""
+
+# Columns added to the missions table after its initial schema (forward-compat).
+_MISSIONS_MIGRATION_COLUMNS: dict[str, str] = {
+    "parent_mission_id": "TEXT",
+    "nested_spent_usd":  "REAL",
+}
 
 # Columns added after the initial schema — applied via ALTER TABLE on existing DBs
 _MIGRATION_COLUMNS: dict[str, str] = {
@@ -71,6 +109,10 @@ _MIGRATION_COLUMNS: dict[str, str] = {
     "optimization_shadow":     "INTEGER DEFAULT 0",
     "sampled_out":             "INTEGER DEFAULT 0",
     "quality_regression":      "INTEGER DEFAULT 0",
+    "mission_id":              "TEXT",
+    "parent_call_id":          "TEXT",
+    "record_type":             "TEXT DEFAULT 'call'",
+    "intervention_event":      "TEXT",
 }
 
 
@@ -80,8 +122,9 @@ class SQLiteStorage:
         self._local = threading.local()
         conn = self._conn()
         conn.execute(_CREATE_TABLE)
+        conn.execute(_CREATE_MISSIONS_TABLE)
         self._migrate(conn)
-        for stmt in _CREATE_INDEXES.strip().splitlines():
+        for stmt in (_CREATE_INDEXES + _CREATE_MISSIONS_INDEXES).strip().splitlines():
             stmt = stmt.strip().rstrip(";")
             if stmt:
                 conn.execute(stmt)
@@ -95,6 +138,10 @@ class SQLiteStorage:
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Add any missing columns to an existing database."""
+        existing_missions = {row[1] for row in conn.execute("PRAGMA table_info(missions)")}
+        for col, definition in _MISSIONS_MIGRATION_COLUMNS.items():
+            if col not in existing_missions:
+                conn.execute(f"ALTER TABLE missions ADD COLUMN {col} {definition}")
         existing = {row[1] for row in conn.execute("PRAGMA table_info(calls)")}
         for col, definition in _MIGRATION_COLUMNS.items():
             if col not in existing:
@@ -113,8 +160,9 @@ class SQLiteStorage:
                 labels, warnings, request_id, prompt_hash,
                 cache_hit, cache_key,
                 tokens_saved_prompt, tokens_saved_completion, estimated_savings_usd,
-                optimization_enabled, optimization_shadow, sampled_out, quality_regression
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                optimization_enabled, optimization_shadow, sampled_out, quality_regression,
+                mission_id, parent_call_id, record_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'call')
             """,
             (
                 m.timestamp.isoformat(),
@@ -141,6 +189,38 @@ class SQLiteStorage:
                 int(m.optimization_shadow),
                 int(m.sampled_out),
                 int(m.quality_regression),
+                m.mission_id,
+                m.parent_call_id,
+            ),
+        )
+        conn.commit()
+
+    def save_intervention(self, mission_id: str, event: dict) -> None:
+        """
+        Persist a mission intervention as its own record type.
+
+        Stored in the same table with record_type='intervention' so the full
+        mission timeline (calls + interventions) lives in one place. The event
+        dict (action, reason, spend snapshot, ...) is serialized to JSON.
+        """
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT INTO calls (
+                timestamp, provider, model, endpoint,
+                prompt_tokens, completion_tokens, total_tokens,
+                latency_ms, estimated_cost_usd, labels, warnings, request_id,
+                mission_id, record_type, intervention_event
+            ) VALUES (?, 'driftlock', '(intervention)', ?, 0, 0, 0, 0.0, 0.0, ?, ?, ?, ?, 'intervention', ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                event.get("action"),
+                json.dumps({"mission_id": mission_id}),
+                json.dumps([]),
+                event.get("call_id"),
+                mission_id,
+                json.dumps(event),
             ),
         )
         conn.commit()
@@ -158,7 +238,7 @@ class SQLiteStorage:
         Return aggregated stats filtered by any combination of dimensions.
         Includes cache savings so callers can see total ROI.
         """
-        where_clauses: list[str] = []
+        where_clauses: list[str] = ["record_type = 'call'"]
         params: list = []
 
         if endpoint:
@@ -180,7 +260,7 @@ class SQLiteStorage:
             where_clauses.append("timestamp >= ?")
             params.append(since)
 
-        where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        where = "WHERE " + " AND ".join(where_clauses)
 
         row = self._conn().execute(
             f"""
@@ -228,7 +308,8 @@ class SQLiteStorage:
 
     def recent(self, limit: int = 20) -> list[dict]:
         rows = self._conn().execute(
-            "SELECT * FROM calls ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM calls WHERE record_type = 'call' ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         result = []
         for r in rows:
@@ -251,12 +332,14 @@ class SQLiteStorage:
         """Return number of calls recorded since an ISO timestamp."""
         if user_id:
             row = self._conn().execute(
-                "SELECT COUNT(*) FROM calls WHERE timestamp >= ? AND user_id = ?",
+                "SELECT COUNT(*) FROM calls "
+                "WHERE record_type = 'call' AND timestamp >= ? AND user_id = ?",
                 (since, user_id),
             ).fetchone()
         else:
             row = self._conn().execute(
-                "SELECT COUNT(*) FROM calls WHERE timestamp >= ?", (since,)
+                "SELECT COUNT(*) FROM calls WHERE record_type = 'call' AND timestamp >= ?",
+                (since,),
             ).fetchone()
         return row[0] or 0
 
@@ -265,12 +348,13 @@ class SQLiteStorage:
         if user_id:
             row = self._conn().execute(
                 "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM calls "
-                "WHERE timestamp >= ? AND user_id = ?",
+                "WHERE record_type = 'call' AND timestamp >= ? AND user_id = ?",
                 (since, user_id),
             ).fetchone()
         else:
             row = self._conn().execute(
-                "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM calls WHERE timestamp >= ?",
+                "SELECT COALESCE(SUM(estimated_cost_usd), 0.0) FROM calls "
+                "WHERE record_type = 'call' AND timestamp >= ?",
                 (since,),
             ).fetchone()
         return float(row[0] or 0.0)
@@ -281,7 +365,7 @@ class SQLiteStorage:
 
     def top_users(self, since: str | None = None, limit: int = 20) -> list[dict]:
         """Return per-user cost breakdown, highest spend first."""
-        where = "WHERE user_id IS NOT NULL"
+        where = "WHERE record_type = 'call' AND user_id IS NOT NULL"
         params: list = []
         if since:
             where += " AND timestamp >= ?"
@@ -309,10 +393,10 @@ class SQLiteStorage:
 
     def model_distribution(self, since: str | None = None) -> list[dict]:
         """Return per-model call count and cost share."""
-        where = ""
+        where = "WHERE record_type = 'call'"
         params: list = []
         if since:
-            where = "WHERE timestamp >= ?"
+            where += " AND timestamp >= ?"
             params.append(since)
         rows = self._conn().execute(
             f"""
@@ -346,7 +430,7 @@ class SQLiteStorage:
             """
             SELECT timestamp, prompt_hash, prompt_tokens
             FROM calls
-            WHERE endpoint = ? AND prompt_hash IS NOT NULL
+            WHERE record_type = 'call' AND endpoint = ? AND prompt_hash IS NOT NULL
             ORDER BY id DESC LIMIT ?
             """,
             (endpoint, limit),
@@ -371,7 +455,7 @@ class SQLiteStorage:
                    COUNT(*)                          AS calls,
                    COALESCE(SUM(estimated_cost_usd), 0) AS cost_usd
             FROM calls
-            WHERE timestamp >= ?
+            WHERE record_type = 'call' AND timestamp >= ?
             GROUP BY day
             ORDER BY day ASC
             """,
@@ -386,11 +470,272 @@ class SQLiteStorage:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------ #
+    # Mission queries (runtime guardrails for agents)
+    # ------------------------------------------------------------------ #
+
+    def mission_calls(self, mission_id: str) -> list[dict]:
+        """Return all tracked calls for a mission, oldest first."""
+        rows = self._conn().execute(
+            """
+            SELECT * FROM calls
+            WHERE record_type = 'call' AND mission_id = ?
+            ORDER BY id ASC
+            """,
+            (mission_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["labels"] = json.loads(d["labels"] or "{}")
+            d["warnings"] = json.loads(d["warnings"] or "[]")
+            d["cache_hit"] = bool(d.get("cache_hit", 0))
+            result.append(d)
+        return result
+
+    def mission_interventions(self, mission_id: str) -> list[dict]:
+        """Return all intervention events recorded for a mission, oldest first."""
+        rows = self._conn().execute(
+            """
+            SELECT timestamp, intervention_event FROM calls
+            WHERE record_type = 'intervention' AND mission_id = ?
+            ORDER BY id ASC
+            """,
+            (mission_id,),
+        ).fetchall()
+        events = []
+        for r in rows:
+            event = json.loads(r["intervention_event"] or "{}")
+            event.setdefault("timestamp", r["timestamp"])
+            events.append(event)
+        return events
+
+    # ------------------------------------------------------------------ #
+    # Mission lifecycle (persistence + recovery)
+    # ------------------------------------------------------------------ #
+
+    def start_mission(self, record: dict) -> None:
+        """Insert a 'running' row when a mission is entered (idempotent)."""
+        conn = self._conn()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO missions (
+                mission_id, name, budget_usd, expected_calls, on_exceed,
+                downgrade_to, parent_mission_id, started_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')
+            """,
+            (
+                record["mission_id"],
+                record.get("name"),
+                record.get("budget_usd"),
+                record.get("expected_calls"),
+                record.get("on_exceed"),
+                record.get("downgrade_to"),
+                record.get("parent_mission_id"),
+                record.get("started_at"),
+            ),
+        )
+        conn.commit()
+
+    def finalize_mission(self, record: dict) -> None:
+        """Update a mission row to its terminal status with final stats."""
+        conn = self._conn()
+        cur = conn.execute(
+            """
+            UPDATE missions
+            SET status = ?, ended_at = ?, final_spent = ?,
+                final_call_count = ?, nested_spent_usd = ?
+            WHERE mission_id = ?
+            """,
+            (
+                record.get("status"),
+                record.get("ended_at"),
+                record.get("final_spent"),
+                record.get("final_call_count"),
+                record.get("nested_spent_usd"),
+                record["mission_id"],
+            ),
+        )
+        if cur.rowcount == 0:
+            # Start row was never persisted (e.g. storage bound only at finalize).
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO missions (
+                    mission_id, name, budget_usd, expected_calls, on_exceed,
+                    downgrade_to, parent_mission_id, started_at, ended_at,
+                    status, final_spent, final_call_count, nested_spent_usd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["mission_id"],
+                    record.get("name"),
+                    record.get("budget_usd"),
+                    record.get("expected_calls"),
+                    record.get("on_exceed"),
+                    record.get("downgrade_to"),
+                    record.get("parent_mission_id"),
+                    record.get("started_at"),
+                    record.get("ended_at"),
+                    record.get("status"),
+                    record.get("final_spent"),
+                    record.get("final_call_count"),
+                    record.get("nested_spent_usd"),
+                ),
+            )
+        conn.commit()
+
+    def get_mission(self, mission_id: str) -> dict | None:
+        """Return the missions-table row for a mission, or None."""
+        r = self._conn().execute(
+            "SELECT * FROM missions WHERE mission_id = ?", (mission_id,)
+        ).fetchone()
+        return dict(r) if r else None
+
+    def avg_calls_per_mission(self, limit: int = 10) -> float | None:
+        """
+        Average call count over the last N completed missions — used to project
+        remaining calls when the caller gives no ``expected_calls`` hint.
+        """
+        rows = self._conn().execute(
+            """
+            SELECT final_call_count FROM missions
+            WHERE status != 'running' AND final_call_count IS NOT NULL
+            ORDER BY COALESCE(ended_at, started_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        vals = [r[0] for r in rows if r[0] is not None]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    def _mission_call_totals(self, mission_id: str) -> tuple[int, float]:
+        """Live (count, cost) from call records — fallback for running missions."""
+        r = self._conn().execute(
+            """
+            SELECT COUNT(*) AS calls, COALESCE(SUM(estimated_cost_usd), 0) AS cost
+            FROM calls WHERE record_type = 'call' AND mission_id = ?
+            """,
+            (mission_id,),
+        ).fetchone()
+        return (r["calls"] or 0, float(r["cost"] or 0.0))
+
+    def list_missions(self, limit: int = 20, since: str | None = None) -> list[dict]:
+        """
+        Return recent missions from the missions table, most recent first.
+        Falls back to live call aggregation for rows still 'running'.
+        """
+        where = ""
+        params: list = []
+        if since:
+            where = "WHERE started_at >= ?"
+            params.append(since)
+        rows = self._conn().execute(
+            f"""
+            SELECT * FROM missions {where}
+            ORDER BY COALESCE(ended_at, started_at) DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            mid = d["mission_id"]
+            calls = d.get("final_call_count")
+            cost = d.get("final_spent")
+            if calls is None or cost is None:
+                calls, cost = self._mission_call_totals(mid)
+            interventions = len(self.mission_interventions(mid))
+            result.append(
+                {
+                    "mission_id": mid,
+                    "name": d.get("name"),
+                    "status": d.get("status") or "running",
+                    "calls": calls or 0,
+                    "total_cost_usd": round(float(cost or 0.0), 6),
+                    "budget_usd": d.get("budget_usd"),
+                    "interventions": interventions,
+                    "started_at": d.get("started_at"),
+                    "ended_at": d.get("ended_at"),
+                }
+            )
+        return result
+
+    def _mission_status(self, mission_id: str) -> str:
+        """Derive a mission's final status from its intervention events."""
+        actions = {e.get("action") for e in self.mission_interventions(mission_id)}
+        if actions & {"kill", "pause"}:
+            return "killed"
+        if "downgrade" in actions:
+            return "degraded"
+        return "completed"
+
+    # ------------------------------------------------------------------ #
+    # Dashboard data API helpers (Phase 2)
+    # ------------------------------------------------------------------ #
+
+    def metrics_summary(self) -> dict:
+        """Total spend, calls, and mission counts for today and this month."""
+        now = datetime.now(timezone.utc)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        def _calls(since: str) -> dict:
+            r = self._conn().execute(
+                """
+                SELECT COUNT(*) AS calls,
+                       COALESCE(SUM(estimated_cost_usd), 0) AS cost
+                FROM calls WHERE record_type = 'call' AND timestamp >= ?
+                """,
+                (since,),
+            ).fetchone()
+            return {"calls": r["calls"] or 0, "spend_usd": round(float(r["cost"] or 0.0), 6)}
+
+        def _missions(since: str) -> int:
+            r = self._conn().execute(
+                "SELECT COUNT(*) FROM missions WHERE started_at >= ?", (since,)
+            ).fetchone()
+            return r[0] or 0
+
+        return {
+            "today": {**_calls(today), "missions": _missions(today)},
+            "this_month": {**_calls(month), "missions": _missions(month)},
+        }
+
+    def hourly_burn_rate(self, hours: int = 24) -> list[dict]:
+        """Per-hour spend + call count over the last N hours (oldest first)."""
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        rows = self._conn().execute(
+            """
+            SELECT SUBSTR(timestamp, 1, 13)              AS hour,
+                   COUNT(*)                              AS calls,
+                   COALESCE(SUM(estimated_cost_usd), 0)  AS cost_usd
+            FROM calls
+            WHERE record_type = 'call' AND timestamp >= ?
+            GROUP BY hour
+            ORDER BY hour ASC
+            """,
+            (since,),
+        ).fetchall()
+        return [
+            {
+                "hour": r["hour"],
+                "calls": r["calls"],
+                "cost_usd": round(float(r["cost_usd"]), 6),
+            }
+            for r in rows
+        ]
+
 
 class NoopStorage:
     """Discards all data (useful in tests or when storage is disabled)."""
 
     def save(self, m: CallMetrics) -> None:
+        pass
+
+    def save_intervention(self, mission_id: str, event: dict) -> None:
         pass
 
     def aggregate(self, **kwargs) -> dict:
@@ -415,4 +760,31 @@ class NoopStorage:
         return []
 
     def daily_cost_trend(self, lookback_days: int = 7) -> list[dict]:
+        return []
+
+    def mission_calls(self, mission_id: str) -> list[dict]:
+        return []
+
+    def mission_interventions(self, mission_id: str) -> list[dict]:
+        return []
+
+    def list_missions(self, limit: int = 20, since: str | None = None) -> list[dict]:
+        return []
+
+    def start_mission(self, record: dict) -> None:
+        pass
+
+    def finalize_mission(self, record: dict) -> None:
+        pass
+
+    def get_mission(self, mission_id: str) -> dict | None:
+        return None
+
+    def avg_calls_per_mission(self, limit: int = 10) -> float | None:
+        return None
+
+    def metrics_summary(self) -> dict:
+        return {"today": {}, "this_month": {}}
+
+    def hourly_burn_rate(self, hours: int = 24) -> list[dict]:
         return []

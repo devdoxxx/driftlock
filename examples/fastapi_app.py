@@ -20,11 +20,16 @@ from driftlock import CacheConfig, DriftlockClient, DriftlockConfig, Optimizatio
 
 # ---------------------------------------------------------------------------
 # Initialise the client once at startup.
+#
+# api_key falls back to a placeholder so the app can be imported in test/dev
+# without a real key (no network call happens at construction). DRIFTLOCK_DB_PATH
+# points the dashboard at an existing telemetry database.
 # ---------------------------------------------------------------------------
 client = DriftlockClient(
-    api_key=os.environ["OPENAI_API_KEY"],
+    api_key=os.environ.get("OPENAI_API_KEY", "sk-placeholder"),
     config=DriftlockConfig(
         log_json=True,
+        db_path=os.environ.get("DRIFTLOCK_DB_PATH", "driftlock.sqlite"),
         prompt_token_warning_threshold=3000,
         cost_warning_threshold=0.05,
     ),
@@ -155,3 +160,51 @@ async def metrics():
 async def recent_calls(limit: int = 10):
     """Return the N most recent tracked calls (includes cache hits)."""
     return client.recent_calls(limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Mission dashboard data API (Phase 2).
+#
+# These are the data routes a future web dashboard will be built on. No auth.
+# ---------------------------------------------------------------------------
+@app.get("/missions")
+async def list_missions(limit: int = 20, offset: int = 0):
+    """Recent missions, paginated (id, spend, calls, status, interventions)."""
+    rows = client.missions(limit=limit + offset)
+    return {
+        "missions": rows[offset : offset + limit],
+        "limit": limit,
+        "offset": offset,
+        "count": len(rows),
+    }
+
+
+@app.get("/missions/{mission_id}")
+async def mission_detail(mission_id: str):
+    """Full mission stats: spend, direct/nested split, model mix, interventions."""
+    summary = client.resume_mission(mission_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail=f"mission '{mission_id}' not found")
+    return client.mission_stats(mission_id)
+
+
+@app.get("/missions/{mission_id}/calls")
+async def mission_call_graph(mission_id: str):
+    """Parent/child call graph for a mission."""
+    summary = client.resume_mission(mission_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail=f"mission '{mission_id}' not found")
+    stats = client.mission_stats(mission_id)
+    return {"mission_id": mission_id, "call_graph": stats["call_graph"]}
+
+
+@app.get("/metrics/summary")
+async def metrics_summary():
+    """Total spend, calls, and mission counts for today and this month."""
+    return client._storage.metrics_summary()
+
+
+@app.get("/metrics/burn-rate")
+async def burn_rate(hours: int = 24):
+    """Hourly spend + call count over the last N hours."""
+    return {"hours": hours, "buckets": client._storage.hourly_burn_rate(hours=hours)}

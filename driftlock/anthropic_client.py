@@ -45,6 +45,14 @@ from .context import get_active_tags
 from .drift import hash_prompt
 from .logger import DriftlockLogger
 from .metrics import CallMetrics
+from .mission import (
+    MissionSummary,
+    build_mission_stats,
+    current_mission,
+    enforce_before_call,
+    register_default_storage,
+    resume_mission,
+)
 from .optimization import OptimizationConfig, OptimizationPipeline
 from .policy import PolicyEngine, PolicyViolationError
 from .pricing import estimate_cost
@@ -70,6 +78,7 @@ class _AnthropicMessagesWrapper:
         # ------------------------------------------------------------------ #
         endpoint: str | None = kwargs.pop("_dl_endpoint", None)
         labels: dict = kwargs.pop("_dl_labels", {})
+        parent_call_id: str | None = kwargs.pop("_dl_parent_call_id", None)
 
         merged_labels: dict = {
             **self._dl._config.default_labels,
@@ -82,6 +91,13 @@ class _AnthropicMessagesWrapper:
 
         if not enabled and not track_only:
             return self._sync.create(*args, **kwargs)
+
+        # Mission attribution + mid-execution guardrail enforcement (walks the
+        # full mission stack so an exhausted outer mission can halt the run).
+        mission = current_mission()
+        mission_id = mission.mission_id if mission is not None else None
+        if mission is not None:
+            enforce_before_call(kwargs)
 
         # ------------------------------------------------------------------ #
         # 2. Normalize messages for optimization pipeline
@@ -210,9 +226,13 @@ class _AnthropicMessagesWrapper:
                     optimization_enabled=optimization_enabled,
                     optimization_shadow=optimization_shadow,
                     sampled_out=sampled_out,
+                    mission_id=mission_id,
+                    parent_call_id=parent_call_id,
                 )
                 self._dl._logger.log_call(metrics)
                 self._dl._storage.save(metrics)
+                if mission is not None:
+                    mission._record_call(metrics, self._dl._storage)
                 return entry.response
 
         # ------------------------------------------------------------------ #
@@ -265,10 +285,14 @@ class _AnthropicMessagesWrapper:
             optimization_enabled=optimization_enabled,
             optimization_shadow=optimization_shadow,
             sampled_out=sampled_out,
+            mission_id=mission_id,
+            parent_call_id=parent_call_id,
         )
 
         self._dl._logger.log_call(metrics)
         self._dl._storage.save(metrics)
+        if mission is not None:
+            mission._record_call(metrics, self._dl._storage)
         return response
 
     async def acreate(self, *args, **kwargs) -> Any:
@@ -280,6 +304,7 @@ class _AnthropicMessagesWrapper:
         # ------------------------------------------------------------------ #
         endpoint: str | None = kwargs.pop("_dl_endpoint", None)
         labels: dict = kwargs.pop("_dl_labels", {})
+        parent_call_id: str | None = kwargs.pop("_dl_parent_call_id", None)
 
         merged_labels: dict = {
             **self._dl._config.default_labels,
@@ -292,6 +317,13 @@ class _AnthropicMessagesWrapper:
 
         if not enabled and not track_only:
             return await self._async.create(*args, **kwargs)
+
+        # Mission attribution + mid-execution guardrail enforcement (walks the
+        # full mission stack so an exhausted outer mission can halt the run).
+        mission = current_mission()
+        mission_id = mission.mission_id if mission is not None else None
+        if mission is not None:
+            enforce_before_call(kwargs)
 
         system_text: str | None = kwargs.pop("system", None)
         messages: list[dict] = list(kwargs.get("messages", []))
@@ -400,9 +432,13 @@ class _AnthropicMessagesWrapper:
                     optimization_enabled=optimization_enabled,
                     optimization_shadow=optimization_shadow,
                     sampled_out=sampled_out,
+                    mission_id=mission_id,
+                    parent_call_id=parent_call_id,
                 )
                 self._dl._logger.log_call(metrics)
                 await asyncio.to_thread(self._dl._storage.save, metrics)
+                if mission is not None:
+                    await mission._arecord_call(metrics, self._dl._storage)
                 return entry.response
 
         start = time.perf_counter()
@@ -449,10 +485,14 @@ class _AnthropicMessagesWrapper:
             optimization_enabled=optimization_enabled,
             optimization_shadow=optimization_shadow,
             sampled_out=sampled_out,
+            mission_id=mission_id,
+            parent_call_id=parent_call_id,
         )
 
         self._dl._logger.log_call(metrics)
         await asyncio.to_thread(self._dl._storage.save, metrics)
+        if mission is not None:
+            await mission._arecord_call(metrics, self._dl._storage)
         return response
 
 
@@ -507,6 +547,7 @@ class AnthropicDriftlockClient:
             self._storage = SQLiteStorage(self._config.db_path)
         else:
             self._storage = NoopStorage()
+        register_default_storage(self._storage)
 
         self.messages = _AnthropicMessagesClientWrapper(
             self._sync_anthropic, self._async_anthropic, self
@@ -529,6 +570,22 @@ class AnthropicDriftlockClient:
     def recent_calls(self, limit: int = 20) -> list[dict]:
         """Return the N most recent tracked calls."""
         return self._storage.recent(limit=limit)
+
+    def mission_stats(self, mission_id: str) -> dict:
+        """
+        Return an aggregate report for a mission: total spend, call count,
+        the parent/child call graph, per-model distribution, and the list of
+        intervention events that fired during the run.
+        """
+        return build_mission_stats(self._storage, mission_id)
+
+    def missions(self, limit: int = 20, since: str | None = None) -> list[dict]:
+        """Return recent missions with spend, call count, and final status."""
+        return self._storage.list_missions(limit=limit, since=since)
+
+    def resume_mission(self, mission_id: str) -> MissionSummary | None:
+        """Return a read-only :class:`MissionSummary` for a past mission."""
+        return resume_mission(self._storage, mission_id)
 
     def cache_stats(self) -> dict:
         """Return live cache hit/miss stats."""

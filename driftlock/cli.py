@@ -9,6 +9,8 @@ Usage:
     driftlock models [--since 7d]
     driftlock forecast [--lookback N]
     driftlock drift ENDPOINT [--limit N]
+    driftlock missions [--limit N] [--since 7d]
+    driftlock mission MISSION_ID
     driftlock --db PATH <subcommand>
 
 Environment:
@@ -274,6 +276,33 @@ def cmd_demo(args: argparse.Namespace) -> None:
         print("Request succeeded (no metrics stored).")
 
 
+def cmd_missions(args: argparse.Namespace) -> None:
+    storage = _get_storage(_db_path(args))
+    rows = storage.list_missions(limit=args.limit, since=_since_str(args.since))
+    if not rows:
+        print("No missions recorded yet.")
+        return
+    for r in rows:
+        intervened = "yes" if r["interventions"] else "no"
+        print(
+            f"{r['mission_id']:<28} "
+            f"${r['total_cost_usd']:<10.6f} "
+            f"calls={r['calls']:<5} "
+            f"interventions={intervened:<4} "
+            f"status={r['status']}"
+        )
+
+
+def cmd_mission(args: argparse.Namespace) -> None:
+    storage = _get_storage(_db_path(args))
+    from .mission import build_mission_stats
+    stats = build_mission_stats(storage, args.mission_id)
+    if stats["calls"] == 0 and stats["intervention_count"] == 0:
+        print(f"No records found for mission '{args.mission_id}'.")
+        return
+    _print_json(stats)
+
+
 def cmd_drift(args: argparse.Namespace) -> None:
     storage = _get_storage(_db_path(args))
     from .drift import detect_drift
@@ -338,6 +367,15 @@ def main(argv: list[str] | None = None) -> None:
     p_drift.add_argument("endpoint", help="Endpoint name to inspect")
     p_drift.add_argument("--limit", type=int, default=30)
 
+    # missions
+    p_missions = sub.add_parser("missions", help="List recent agent missions")
+    p_missions.add_argument("--limit", type=int, default=20)
+    p_missions.add_argument("--since", metavar="DURATION", default=None)
+
+    # mission <id>
+    p_mission = sub.add_parser("mission", help="Per-mission detail (spend, call graph, interventions)")
+    p_mission.add_argument("mission_id", help="Mission id to inspect")
+
     # demo
     sub.add_parser(
         "demo",
@@ -354,6 +392,8 @@ def main(argv: list[str] | None = None) -> None:
         "models": cmd_models,
         "forecast": cmd_forecast,
         "drift": cmd_drift,
+        "missions": cmd_missions,
+        "mission": cmd_mission,
         "demo": cmd_demo,
     }
     dispatch[args.command](args)

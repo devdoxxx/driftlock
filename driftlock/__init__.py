@@ -9,6 +9,12 @@ from .client import DriftlockClient
 from .config import DriftlockConfig
 from .context import tag
 from .drift import detect_drift, hash_prompt
+from .mission import (
+    MissionBudgetExceededError,
+    MissionContext,
+    MissionSummary,
+    mission,
+)
 from .optimization import BudgetExceededError, OptimizationConfig
 from .policy import (
     BaseRule,
@@ -36,6 +42,11 @@ __all__ = [
     "BudgetExceededError",
     "CacheConfig",
     "tag",
+    # Mission system (runtime financial guardrails for agents)
+    "mission",
+    "MissionContext",
+    "MissionSummary",
+    "MissionBudgetExceededError",
     # Policy engine
     "PolicyEngine",
     "PolicyViolationError",
@@ -69,4 +80,12 @@ try:
     from .anthropic_client import AnthropicDriftlockClient
     __all__.append("AnthropicDriftlockClient")
 except ImportError:
+    pass
+
+# LangChain callback handler is import-safe even without langchain installed
+# (`pip install driftlock[langchain]` only needed to actually wire it up).
+try:
+    from .integrations.langchain import DriftlockCallbackHandler
+    __all__.append("DriftlockCallbackHandler")
+except Exception:  # pragma: no cover - never block the package import
     pass

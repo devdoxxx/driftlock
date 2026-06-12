@@ -67,6 +67,9 @@ class StreamingInterceptor:
         config: Any,
         optimization_report: Any = None,
         policy_decisions: list[dict] | None = None,
+        mission_id: str | None = None,
+        parent_call_id: str | None = None,
+        mission: Any = None,
     ) -> None:
         self._stream = stream
         self._model = model
@@ -80,6 +83,9 @@ class StreamingInterceptor:
         self._config = config
         self._opt_report = optimization_report
         self._policy_decisions = policy_decisions or []
+        self._mission_id = mission_id
+        self._parent_call_id = parent_call_id
+        self._mission = mission
 
         self._completion_chars = 0
         self._prompt_tokens_final: int | None = None
@@ -158,7 +164,11 @@ class StreamingInterceptor:
             prompt_hash=p_hash,
             optimization_report=self._opt_report,
             policy_decisions=self._policy_decisions,
+            mission_id=self._mission_id,
+            parent_call_id=self._parent_call_id,
         )
 
         self._logger.log_call(metrics)
         self._storage.save(metrics)
+        if self._mission is not None:
+            self._mission._record_call(metrics, self._storage)

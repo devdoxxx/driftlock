@@ -1,8 +1,50 @@
 # Driftlock
 
-**LLM cost governance and control layer for Python.**
+**Runtime financial guardrails for AI agents.**
 
-Driftlock sits between your application and LLM providers (OpenAI, Anthropic). It enforces cost policies, detects runaway spending, tracks per-call telemetry, and prevents budget overruns — with a drop-in API wrapper and zero changes to existing call sites.
+An autonomous agent can make dozens of LLM calls per run. When one goes off the
+rails — a retry loop, an exploding context, a runaway plan — you find out *after*
+the bill lands. Driftlock gives an agent run a **budget** and intervenes
+**mid-execution**: it stops, reroutes, or downgrades the model *before* the budget
+blows, not after.
+
+```python
+import driftlock
+
+with driftlock.mission(
+    "research_agent",
+    budget_usd=0.50,
+    on_exceed="downgrade",          # downgrade | pause | kill | callback
+    downgrade_to="gpt-4o-mini",
+    on_warning=lambda m: print(f"⚠️  ${m.spent:.3f} spent, projecting ${m.projected_final_cost:.3f}"),
+) as mission:
+    result = run_agent(topic, client)   # any number of tracked LLM calls
+
+print(f"${mission.spent:.4f} | {mission.call_count} calls | status={mission.status}")
+```
+
+Every call inside the block is attributed to the mission. After each call
+completes, Driftlock recomputes the burn rate and projected final cost and fires
+the intervention **before the next call is allowed through**.
+
+Underneath the mission layer is a full cost-governance stack — policy engine,
+optimization pipeline, response cache, telemetry, alerts — that works as a
+drop-in wrapper around the OpenAI and Anthropic clients (see [Core Features](#core-features)).
+
+---
+
+## How it compares
+
+| | LangSmith / Helicone / Portkey | **Driftlock** |
+|---|---|---|
+| Primary mode | Observability — log what happened | **Intervention** — change what happens next |
+| When it acts | **After** the call (post-hoc traces) | **Before** the next call (pre-emptive) |
+| Budget enforcement | Dashboards & alerts you read later | **Mission budget enforced at runtime** |
+| Runaway agent | Visible in the trace, after the spend | **Killed / downgraded mid-run** |
+| Cost projection | Reporting on past usage | **Live EWMA burn-rate projection per run** |
+
+Observability tools tell you that you overspent. Driftlock stops you from
+overspending. They are complementary — keep your tracing; add a guardrail.
 
 ---
 
@@ -18,9 +60,10 @@ With Anthropic support:
 pip install "driftlock[anthropic]"
 ```
 
-With FastAPI support:
+With LangChain or FastAPI support:
 
 ```bash
+pip install "driftlock[langchain]"
 pip install "driftlock[fastapi]"
 ```
 
@@ -39,6 +82,50 @@ python examples/demo.py
 ```
 
 This runs a fully-mocked demo in-process — no API key, no network calls, no cost. It exercises every major feature: tracking, optimization, budget guardrails, cache, and context tags.
+
+---
+
+## The Agent Demo (the wedge in action)
+
+A realistic multi-step research agent — planning → parallel research → synthesis,
+~6–8 LLM calls — wrapped in a single budgeted mission. Run it against a real key:
+
+```bash
+OPENAI_API_KEY=sk-... python examples/agent_demo.py "impact of interest rates on tech stocks"
+```
+
+Watch the mission warn, then **downgrade the model mid-run** when the projection
+crosses the budget:
+
+```text
+Driftlock research agent — topic: 'impact of interest rates on tech stocks'
+  budget=$0.0300  on_exceed=downgrade  model=gpt-4o → gpt-4o-mini
+
+  plan                   model=gpt-4o         call=$0.0120  spent=$0.0120  [##########--------------]  40.0%
+                         projected_final=n/a (need 3+ calls)  status=completed
+  ⚠️  WARNING: $0.0240 spent of $0.0300, projecting n/a (need 3+ calls)
+  research (parallel)    model=gpt-4o         call=$0.0120  spent=$0.0480  [########################] 100.0%
+                         projected_final=$0.0960  status=degraded
+  synthesize             model=gpt-4o-mini    call=$0.0010  spent=$0.0490  [########################] 100.0%
+                         projected_final=$0.0751  status=degraded
+======================================================================
+Mission complete: $0.0490 spent | 5 calls | status=degraded
+
+Mission stats:
+  total=$0.0490  calls=5  interventions=1  status=degraded
+  model distribution:
+    gpt-4o           4 calls  $0.0480
+    gpt-4o-mini      1 calls  $0.0010
+  interventions:
+    downgrade: spent $0.036000 exceeds budget $0.030000
+```
+
+```bash
+driftlock missions          # the run is recorded, with correct spend + status
+# mission_134ee6f054a34adf     $0.049000   calls=5   interventions=yes  status=degraded
+```
+
+Add `--kill` to demonstrate a hard stop (`on_exceed="kill"`) instead of a downgrade.
 
 ---
 
@@ -70,6 +157,11 @@ Driftlock demo  —  provider=openai  model=gpt-4o-mini
 ```
 
 ---
+
+## Core Features
+
+The mission layer sits on top of a complete cost-governance stack. Everything
+below works on its own (drop-in client wrapper) and composes with missions.
 
 ## Basic Integration — OpenAI
 
@@ -286,6 +378,111 @@ policy = PolicyEngine(rules=[
 
 ---
 
+## Missions — Runtime Financial Guardrails for Agents
+
+The policy engine evaluates one request at a time. A **mission** wraps a whole
+agent run and intervenes **mid-execution** — stopping, rerouting, or downgrading
+a running agent *before* budget damage compounds. This is the layer observability
+tools (LangSmith, Helicone, Portkey) don't have: they log what happened; missions
+change what happens next.
+
+```python
+import driftlock
+
+with driftlock.mission(
+    "research_task",
+    budget_usd=1.00,
+    on_exceed="downgrade",      # downgrade | pause | kill | callback
+    downgrade_to="gpt-4o-mini",
+) as m:
+    result = agent.run("do the thing")   # any number of tracked calls
+    print(m.spent, m.remaining, m.projected_final_cost)
+```
+
+Every tracked call inside the block is attributed to the mission (via the ambient
+tag system). After each call completes, the mission re-evaluates burn rate and
+projected final cost; if an overage is projected, the intervention fires **before
+the next call is allowed through**.
+
+**Intervention modes (`on_exceed`):**
+
+- `"downgrade"` — transparently swap the model to `downgrade_to` for all
+  subsequent calls in the mission.
+- `"kill"` / `"pause"` — raise `MissionBudgetExceededError` on the next call.
+- `"callback"` — hand the decision to your `callback(mission)`, which returns
+  `"continue"`, `"downgrade"`, or `"kill"`.
+
+**Live properties:** `m.spent`, `m.remaining`, `m.direct_spend`, `m.nested_spend`,
+`m.call_count`, `m.burn_rate`, `m.projected_final_cost`, `m.projection_confidence`,
+`m.status`.
+
+**Burn-rate projection.** The projection uses an exponential weighted moving
+average (EWMA, α=0.3) of per-call cost, so recent calls weigh more. It refuses to
+project from fewer than 3 calls (`projected_final_cost is None` — early calls are
+too noisy). With `expected_calls=N` the remaining-call count is exact; without it,
+Driftlock uses the rolling average call count of your last 10 completed missions.
+`projection_confidence` is `low` (<5 calls), `medium` (5–14), or `high` (15+).
+
+> An *actual* budget breach always intervenes immediately — the 3-call minimum
+> only gates *projection-based* pre-emption.
+
+**Soft warnings:** pass `on_warning=callable` (fires **once** per mission when
+spend or projection crosses `warning_threshold`, default `0.8` of the budget).
+
+```python
+def warn(m):
+    print(f"⚠️  {m.spent:.2f}/{m.budget:.2f} spent, projecting {m.projected_final_cost}")
+
+with driftlock.mission("batch", budget_usd=5.00, on_warning=warn, expected_calls=20):
+    ...
+```
+
+**Nested missions (dual attribution).** Missions nest. Every call attributes to
+its innermost mission *and* propagates its cost up the whole stack — so a parent
+mission's budget accounts for all nested work — while each level evaluates its own
+budget independently (an inner budget can be exhausted without killing the outer
+run; an exhausted outer run halts everything).
+
+**Async-safe.** The async record path is guarded by an `asyncio.Lock`, so parallel
+`asyncio.gather` sub-calls inside one mission accumulate spend without races.
+
+**Persistence & recovery.** Each mission is written to a `missions` table —
+`running` on enter, then `completed` / `degraded` / `killed` / `failed` on exit —
+so a crashed process leaves a recoverable record.
+
+```python
+summary = client.resume_mission(mission_id)   # read-only MissionSummary for post-run analysis
+summary.status, summary.spent_usd, summary.nested_spent_usd, summary.over_budget
+```
+
+**Querying afterwards:**
+
+```python
+client.mission_stats(mission_id)   # spend, direct/nested split, call graph, model mix, interventions
+client.missions(limit=20)          # recent missions with status
+```
+
+```bash
+driftlock missions            # list recent missions (spend, calls, status)
+driftlock mission <id>        # per-mission detail + call graph + interventions
+```
+
+**LangChain.** Already using LangChain? Attach `DriftlockCallbackHandler` to your
+LLM and missions govern it the same way (`pip install "driftlock[langchain]"`):
+
+```python
+from driftlock.integrations import DriftlockCallbackHandler
+llm = ChatOpenAI(model="gpt-4o", callbacks=[DriftlockCallbackHandler(client=dl_client)])
+with driftlock.mission("lc_agent", budget_usd=0.50, on_exceed="kill"):
+    agent.invoke(...)
+```
+
+Mission calls and intervention events are persisted to SQLite as their own record
+types, so the full run timeline is queryable later. Existing call analytics
+(`stats`, `forecast`, velocity rules) ignore intervention rows.
+
+---
+
 ## Alerts
 
 Fire-and-forget notifications when policies trip or cost thresholds are crossed.
@@ -410,6 +607,8 @@ driftlock top-endpoints --since 7d      # most expensive endpoints
 driftlock top-users --since 30d         # per-user spend
 driftlock models                        # spend by model
 driftlock drift summarise_article       # prompt change history
+driftlock missions                      # recent agent missions + status
+driftlock mission <id>                  # per-mission detail + call graph
 driftlock --db /path/to/other.db stats  # point at a different db
 ```
 
@@ -435,6 +634,17 @@ See [examples/fastapi_app.py](examples/fastapi_app.py) for a full integration wi
 OPENAI_API_KEY=sk-... uvicorn examples.fastapi_app:app --reload
 ```
 
+It also exposes a **mission dashboard data API** (the foundation for a future web
+dashboard — clean JSON, no auth):
+
+```
+GET /missions                      # recent missions, paginated
+GET /missions/{mission_id}         # full mission stats (spend, direct/nested, model mix)
+GET /missions/{mission_id}/calls   # parent/child call graph
+GET /metrics/summary               # spend, calls, missions — today / this month
+GET /metrics/burn-rate?hours=24    # hourly spend for the last N hours
+```
+
 ---
 
 ## Project Structure
@@ -444,6 +654,8 @@ driftlock/
 ├── __init__.py          # Public API
 ├── client.py            # DriftlockClient (OpenAI wrapper, sync + async)
 ├── anthropic_client.py  # AnthropicDriftlockClient (opt-in)
+├── mission.py           # Mission system — runtime guardrails for agents
+├── integrations/        # LangChain callback handler (opt-in)
 ├── config.py            # DriftlockConfig
 ├── policy.py            # PolicyEngine + all rules
 ├── alerts.py            # AlertChannel, Webhook/Slack/Log implementations
@@ -462,10 +674,12 @@ driftlock/
 
 examples/
 ├── basic_usage.py
-├── fastapi_app.py
+├── agent_demo.py            # multi-step research agent under a mission budget
+├── langchain_agent_demo.py  # same, via the LangChain callback handler
+├── fastapi_app.py           # + mission dashboard data API
 └── dashboard_app.py
 
-tests/                   # 131 tests
+tests/                   # 210 tests
 ```
 
 ---
@@ -491,11 +705,20 @@ tests/                   # 131 tests
 | Alert channels (Slack, Webhook, Log) | ✅ |
 | Ambient tagging context manager | ✅ |
 | CLI (stats, forecast, drift, top-users) | ✅ |
+| **Mission budgets (runtime guardrails for agents)** | ✅ |
+| **Mid-run intervention (downgrade / pause / kill / callback)** | ✅ |
+| **EWMA burn-rate projection** | ✅ |
+| **Nested missions with dual attribution** | ✅ |
+| **Async-safe spend accounting (`asyncio.Lock`)** | ✅ |
+| **Mission persistence + recovery (`resume_mission`)** | ✅ |
+| **LangChain callback handler** | ✅ |
+| **Mission dashboard data API** | ✅ |
+| PyPI release | ✅ |
+| Web dashboard (built on the data API) | Next |
+| Postgres / Redis storage backend | Next |
 | OpenTelemetry export | Planned |
-| Redis cache backend | Planned |
 | Semantic (embedding-based) cache | Planned |
 | Gemini adapter | Planned |
-| PyPI release | ✅ |
 
 ---
 
