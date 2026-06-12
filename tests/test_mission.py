@@ -635,3 +635,30 @@ def test_mission_without_active_client_is_noop():
         assert m.call_count == 0
         assert m.spent == 0.0
     assert current_mission() is None
+
+
+def test_kill_escaping_block_finalizes_as_killed(make_client):
+    """
+    A MissionBudgetExceededError that propagates OUT of the with-block is the
+    guardrail working — the mission must finalize as 'killed', not 'failed'.
+    (Integrations like the LangGraph middleware rely on this.)
+    """
+    client, _ = make_client(cost_per_call=1.5)
+    with pytest.raises(MissionBudgetExceededError):
+        with driftlock.mission(
+            "escape", budget_usd=1.0, on_exceed="kill", mission_id="m_escape"
+        ):
+            _call(client)   # breach -> kill armed
+            _call(client)   # raises, escapes the block
+    row = client._storage.get_mission("m_escape")
+    assert row["status"] == "killed"
+
+
+def test_unrelated_exception_still_finalizes_as_failed(make_client):
+    client, _ = make_client(cost_per_call=0.1)
+    with pytest.raises(RuntimeError):
+        with driftlock.mission("boom", budget_usd=10.0, mission_id="m_boom"):
+            _call(client)
+            raise RuntimeError("agent crashed")
+    row = client._storage.get_mission("m_boom")
+    assert row["status"] == "failed"

@@ -704,6 +704,38 @@ class SQLiteStorage:
             "this_month": {**_calls(month), "missions": _missions(month)},
         }
 
+    def top_endpoints(self, since: str | None = None, limit: int = 5) -> list[dict]:
+        """Per-endpoint spend leaderboard: calls, total/avg cost, avg latency."""
+        where = "WHERE record_type = 'call'"
+        params: list = []
+        if since:
+            where += " AND timestamp >= ?"
+            params.append(since)
+        rows = self._conn().execute(
+            f"""
+            SELECT COALESCE(endpoint, '(none)')           AS endpoint,
+                   COUNT(*)                               AS calls,
+                   COALESCE(SUM(estimated_cost_usd), 0)   AS total_cost_usd,
+                   COALESCE(AVG(estimated_cost_usd), 0)   AS avg_cost_usd,
+                   COALESCE(AVG(latency_ms), 0)           AS avg_latency_ms
+            FROM calls {where}
+            GROUP BY COALESCE(endpoint, '(none)')
+            ORDER BY total_cost_usd DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        ).fetchall()
+        return [
+            {
+                "endpoint": r["endpoint"],
+                "calls": r["calls"],
+                "total_cost_usd": round(float(r["total_cost_usd"]), 6),
+                "avg_cost_usd": round(float(r["avg_cost_usd"]), 6),
+                "avg_latency_ms": round(float(r["avg_latency_ms"]), 2),
+            }
+            for r in rows
+        ]
+
     def hourly_burn_rate(self, hours: int = 24) -> list[dict]:
         """Per-hour spend + call count over the last N hours (oldest first)."""
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -785,6 +817,9 @@ class NoopStorage:
 
     def metrics_summary(self) -> dict:
         return {"today": {}, "this_month": {}}
+
+    def top_endpoints(self, since: str | None = None, limit: int = 5) -> list[dict]:
+        return []
 
     def hourly_burn_rate(self, hours: int = 24) -> list[dict]:
         return []

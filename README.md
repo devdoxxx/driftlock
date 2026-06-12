@@ -60,10 +60,11 @@ With Anthropic support:
 pip install "driftlock[anthropic]"
 ```
 
-With LangChain or FastAPI support:
+With LangChain, LangGraph, or FastAPI support:
 
 ```bash
 pip install "driftlock[langchain]"
+pip install "driftlock[langgraph]"
 pip install "driftlock[fastapi]"
 ```
 
@@ -71,61 +72,82 @@ Requires Python ≥ 3.11.
 
 ---
 
-## Try It Now (no API key needed)
-
-Clone the repo and run the full interactive demo:
+## Try It in 30 Seconds (no API key needed)
 
 ```bash
 git clone https://github.com/maddox-214/driftlock && cd driftlock
 pip install -e .
-python examples/demo.py
+python examples/agent_demo.py "impact of interest rates on tech stocks"
 ```
 
-This runs a fully-mocked demo in-process — no API key, no network calls, no cost. It exercises every major feature: tracking, optimization, budget guardrails, cache, and context tags.
+No `OPENAI_API_KEY` set? The demo runs in **mock mode**: a realistic 7-call
+research agent (plan → 4 parallel research → fact-check → synthesis) flows
+through the *full* Driftlock pipeline — mission context, guardrail hooks,
+intervention engine, SQLite persistence — everything real except the HTTP
+request. Here's the actual output:
+
+```text
+Driftlock research agent [MOCK] — topic: 'impact of interest rates on tech stocks'
+  budget=$0.1500  on_exceed=downgrade  model=gpt-4o → gpt-4o-mini
+
+  plan                   model=gpt-4o         call=$0.0003  spent=$0.0003  [------------------------]   0.2%
+                         projected_final=n/a (need 3+ calls)  status=completed
+  └─ 4 subtasks: Historical precedent and key dri, Current data and leading indicat, ...
+  ⚠️  WARNING: $0.0543 spent of $0.1500, projecting $0.1378
+
+  research (parallel)    model=gpt-4o         call=$0.0180  spent=$0.0723  [############------------]  48.2%
+                         projected_final=$0.1548  status=degraded
+  └─ 4 findings gathered
+  fact-check             model=gpt-4o-mini    call=$0.0023  spent=$0.0746  [############------------]  49.7%
+                         projected_final=$0.1262  status=degraded
+  synthesize             model=gpt-4o-mini    call=$0.0049  spent=$0.0795  [#############-----------]  53.0%
+                         projected_final=$0.1143  status=degraded
+
+======================================================================
+Mission complete: $0.0795 spent | 7 calls | status=degraded
+
+Mission stats:
+  total=$0.0795  calls=7  interventions=1  status=degraded
+  model distribution:
+    gpt-4o           5 calls  $0.0723
+    gpt-4o-mini      2 calls  $0.0072
+  interventions:
+    downgrade: projected_final_cost $0.154801 exceeds budget $0.150000
+```
+
+Read that intervention line again: the agent never actually exceeded its budget.
+Driftlock **projected** the breach from the live burn rate and downgraded the
+model *before* the expensive fact-check call went out — the run finished at 53%
+of budget instead of 135%.
+
+```bash
+python examples/agent_demo.py "any topic" --kill    # hard stop instead of downgrade
+driftlock missions                                  # both runs recorded with correct status
+# mission_02de67d7...   $0.072300   calls=5   interventions=yes  status=killed
+# mission_96c1e9e8...   $0.079505   calls=7   interventions=yes  status=degraded
+```
+
+With `OPENAI_API_KEY` set, the same command runs against the real API (or force
+simulation with `--mock`).
 
 ---
 
-## The Agent Demo (the wedge in action)
+## Demos
 
-A realistic multi-step research agent — planning → parallel research → synthesis,
-~6–8 LLM calls — wrapped in a single budgeted mission. Run it against a real key:
+Every demo is a single command from a fresh clone:
 
-```bash
-OPENAI_API_KEY=sk-... python examples/agent_demo.py "impact of interest rates on tech stocks"
-```
+| Demo | Command | Needs a key? |
+|---|---|---|
+| **Budgeted agent run** (warn → downgrade mid-run) | `python examples/agent_demo.py "your topic"` | No (mock) |
+| **Kill switch** (hard stop mid-run) | `python examples/agent_demo.py "your topic" --kill` | No (mock) |
+| **Web dashboard** (mission control UI) | `uvicorn examples.fastapi_app:app` → open localhost:8000 | No |
+| **CLI receipt** (one real call + cost receipt) | `driftlock demo` | Yes |
+| **Feature tour** (tracking, cache, policies) | `python examples/demo.py` | No |
+| **LangChain agent** under a mission | `python examples/langchain_agent_demo.py "topic"` | Yes |
+| **LangGraph agent** with critic loop + intervention | `python examples/langgraph_agent_demo.py "topic"` | Yes |
 
-Watch the mission warn, then **downgrade the model mid-run** when the projection
-crosses the budget:
-
-```text
-Driftlock research agent — topic: 'impact of interest rates on tech stocks'
-  budget=$0.0300  on_exceed=downgrade  model=gpt-4o → gpt-4o-mini
-
-  plan                   model=gpt-4o         call=$0.0120  spent=$0.0120  [##########--------------]  40.0%
-                         projected_final=n/a (need 3+ calls)  status=completed
-  ⚠️  WARNING: $0.0240 spent of $0.0300, projecting n/a (need 3+ calls)
-  research (parallel)    model=gpt-4o         call=$0.0120  spent=$0.0480  [########################] 100.0%
-                         projected_final=$0.0960  status=degraded
-  synthesize             model=gpt-4o-mini    call=$0.0010  spent=$0.0490  [########################] 100.0%
-                         projected_final=$0.0751  status=degraded
-======================================================================
-Mission complete: $0.0490 spent | 5 calls | status=degraded
-
-Mission stats:
-  total=$0.0490  calls=5  interventions=1  status=degraded
-  model distribution:
-    gpt-4o           4 calls  $0.0480
-    gpt-4o-mini      1 calls  $0.0010
-  interventions:
-    downgrade: spent $0.036000 exceeds budget $0.030000
-```
-
-```bash
-driftlock missions          # the run is recorded, with correct spend + status
-# mission_134ee6f054a34adf     $0.049000   calls=5   interventions=yes  status=degraded
-```
-
-Add `--kill` to demonstrate a hard stop (`on_exceed="kill"`) instead of a downgrade.
+Run the mock agent demo first, then start the dashboard — it will already have
+mission data to show.
 
 ---
 
@@ -477,6 +499,37 @@ with driftlock.mission("lc_agent", budget_usd=0.50, on_exceed="kill"):
     agent.invoke(...)
 ```
 
+**LangGraph.** Wrap a compiled graph in `DriftlockLangGraphMiddleware` and the
+whole invocation runs as a mission, with spend attributed **per graph node**
+(`pip install "driftlock[langgraph]"`):
+
+```python
+from driftlock.integrations.langgraph import DriftlockLangGraphMiddleware
+
+graph = DriftlockLangGraphMiddleware(
+    compiled_graph,
+    client=dl_client,
+    mission_budget_usd=0.30,
+    on_exceed="downgrade",
+    downgrade_to="gpt-4o-mini",
+)
+result = graph.invoke({"topic": "impact of interest rates on tech stocks"})
+stats = dl_client.mission_stats(graph.last_mission_id)   # per-node spend, interventions
+```
+
+Nodes pick their model through the middleware — one line makes the downgrade
+intervention real inside the graph:
+
+```python
+llm = ChatOpenAI(model=graph.current_model("gpt-4o"))
+```
+
+[examples/langgraph_agent_demo.py](examples/langgraph_agent_demo.py) builds a
+ReAct-style agent with a **critic→researcher loop** — the classic runaway-cost
+shape — and shows the mission stepping in before the loop burns the budget. A
+killed graph finalizes its mission as `killed` (not `failed`), so post-mortems
+stay accurate.
+
 Mission calls and intervention events are persisted to SQLite as their own record
 types, so the full run timeline is queryable later. Existing call analytics
 (`stats`, `forecast`, velocity rules) ignore intervention rows.
@@ -626,16 +679,30 @@ Set `DRIFTLOCK_DB_PATH` to override the default `driftlock.sqlite` path.
 
 ---
 
-## FastAPI Example
+## Web Dashboard
 
-See [examples/fastapi_app.py](examples/fastapi_app.py) for a full integration with middleware tagging, optimization, and cache.
+A single-page mission-control dashboard ships with the FastAPI example — vanilla
+HTML/CSS/JS, no build step, no npm:
 
 ```bash
 OPENAI_API_KEY=sk-... uvicorn examples.fastapi_app:app --reload
+# open http://localhost:8000
 ```
 
-It also exposes a **mission dashboard data API** (the foundation for a future web
-dashboard — clean JSON, no auth):
+(Run `python examples/agent_demo.py "any topic"` first — mock mode, no key — so
+the dashboard has mission data to show.)
+
+What you see: a dark-theme control panel with a stat bar (spend today / this
+month, active missions, calls in the last hour), a live mission feed where each
+row shows a status badge (green completed / amber degraded / red killed), a
+spend-vs-budget progress bar, call count and duration — click a row and the call
+graph expands inline, listing every call's node, model, cost, and latency, with
+intervention events highlighted in amber (downgrade) or red (kill). The right
+column carries an hourly burn-rate SVG bar chart for the last 24h with the
+current hour highlighted, and a top-endpoints spend table. Auto-refreshes every
+10 seconds.
+
+The dashboard is pure frontend over the JSON data API (no auth, clean JSON):
 
 ```
 GET /missions                      # recent missions, paginated
@@ -643,7 +710,11 @@ GET /missions/{mission_id}         # full mission stats (spend, direct/nested, m
 GET /missions/{mission_id}/calls   # parent/child call graph
 GET /metrics/summary               # spend, calls, missions — today / this month
 GET /metrics/burn-rate?hours=24    # hourly spend for the last N hours
+GET /metrics/top-endpoints         # top endpoints by spend (calls, total, avg, latency)
 ```
+
+[examples/fastapi_app.py](examples/fastapi_app.py) also shows the full client
+integration: middleware tagging, optimization, and cache.
 
 ---
 
@@ -655,7 +726,7 @@ driftlock/
 ├── client.py            # DriftlockClient (OpenAI wrapper, sync + async)
 ├── anthropic_client.py  # AnthropicDriftlockClient (opt-in)
 ├── mission.py           # Mission system — runtime guardrails for agents
-├── integrations/        # LangChain callback handler (opt-in)
+├── integrations/        # LangChain handler + LangGraph middleware (opt-in)
 ├── config.py            # DriftlockConfig
 ├── policy.py            # PolicyEngine + all rules
 ├── alerts.py            # AlertChannel, Webhook/Slack/Log implementations
@@ -674,12 +745,14 @@ driftlock/
 
 examples/
 ├── basic_usage.py
-├── agent_demo.py            # multi-step research agent under a mission budget
+├── agent_demo.py            # research agent under a mission budget (mock mode built in)
 ├── langchain_agent_demo.py  # same, via the LangChain callback handler
-├── fastapi_app.py           # + mission dashboard data API
+├── langgraph_agent_demo.py  # ReAct agent with critic loop, via LangGraph middleware
+├── fastapi_app.py           # mission dashboard (UI + data API)
+├── static/dashboard.html    # single-page mission control (no build step)
 └── dashboard_app.py
 
-tests/                   # 210 tests
+tests/                   # 235 tests
 ```
 
 ---
@@ -712,11 +785,14 @@ tests/                   # 210 tests
 | **Async-safe spend accounting (`asyncio.Lock`)** | ✅ |
 | **Mission persistence + recovery (`resume_mission`)** | ✅ |
 | **LangChain callback handler** | ✅ |
+| **LangGraph middleware (per-node attribution)** | ✅ |
 | **Mission dashboard data API** | ✅ |
+| **Web dashboard (mission control UI)** | ✅ |
+| **Zero-key mock demo (full pipeline, no API calls)** | ✅ |
 | PyPI release | ✅ |
-| Web dashboard (built on the data API) | Next |
 | Postgres / Redis storage backend | Next |
-| OpenTelemetry export | Planned |
+| OpenTelemetry export | Next |
+| CrewAI / AutoGen integrations | Planned |
 | Semantic (embedding-based) cache | Planned |
 | Gemini adapter | Planned |
 

@@ -26,7 +26,7 @@ import uuid
 from typing import Any
 
 from ..metrics import CallMetrics
-from ..mission import current_mission
+from ..mission import current_mission, enforce_before_call
 from ..pricing import estimate_cost
 
 _log = logging.getLogger("driftlock")
@@ -68,6 +68,10 @@ class DriftlockCallbackHandler(BaseCallbackHandler):
         self._endpoint = endpoint
         self._default_model = default_model
         self.mission_id: str | None = None
+        # Per-run endpoint overrides (LangGraph stamps the node name into
+        # callback metadata; we map run_id -> node so on_llm_end can attribute
+        # the call to the graph node that made it).
+        self._run_endpoints: dict[str, str] = {}
 
     # ------------------------------------------------------------------ #
     # LangChain callback API
@@ -84,13 +88,17 @@ class DriftlockCallbackHandler(BaseCallbackHandler):
         if mission is None:
             return
         self.mission_id = mission.mission_id
-        # Link traces: stamp mission_id into LangChain's metadata if present.
+        # Link traces: stamp mission_id into LangChain's metadata if present,
+        # and capture the LangGraph node name (if any) for per-node attribution.
         metadata = kwargs.get("metadata")
         if isinstance(metadata, dict):
             metadata.setdefault("driftlock_mission_id", mission.mission_id)
-        # Enforce kill/downgrade state. Raises MissionBudgetExceededError when
-        # the mission is killed, halting the chain mid-run.
-        mission._before_call({})
+            node = metadata.get("langgraph_node")
+            if node:
+                self._run_endpoints[str(kwargs.get("run_id"))] = str(node)
+        # Enforce kill/downgrade state across the whole mission stack. Raises
+        # MissionBudgetExceededError when killed, halting the chain mid-run.
+        enforce_before_call({})
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         """Record token usage from a completed LLM call into the mission."""
@@ -103,6 +111,7 @@ class DriftlockCallbackHandler(BaseCallbackHandler):
         cost = estimate_cost(model, prompt_tokens, completion_tokens)
         run_id = kwargs.get("run_id")
         parent_run_id = kwargs.get("parent_run_id")
+        endpoint = self._run_endpoints.pop(str(run_id), None) or self._endpoint
         metrics = CallMetrics(
             provider="langchain",
             model=model,
@@ -111,7 +120,7 @@ class DriftlockCallbackHandler(BaseCallbackHandler):
             total_tokens=prompt_tokens + completion_tokens,
             latency_ms=0.0,
             estimated_cost_usd=cost,
-            endpoint=self._endpoint,
+            endpoint=endpoint,
             labels={"mission_id": mission.mission_id},
             request_id=str(run_id) if run_id else str(uuid.uuid4()),
             parent_call_id=str(parent_run_id) if parent_run_id else None,
@@ -123,10 +132,15 @@ class DriftlockCallbackHandler(BaseCallbackHandler):
             except Exception:  # pragma: no cover - persistence is best-effort
                 pass
         mission._record_call(metrics, self._storage)
+        self._on_recorded(metrics, mission)
 
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         """Log the error; never corrupt mission spend on a failed call."""
+        self._run_endpoints.pop(str(kwargs.get("run_id")), None)
         _log.warning("driftlock: LangChain LLM error (mission spend untouched): %s", error)
+
+    def _on_recorded(self, metrics: CallMetrics, mission: Any) -> None:
+        """Hook for subclasses (e.g. verbose per-node printing). No-op here."""
 
 
 def _extract_usage(response: Any, default_model: str) -> tuple[str, int, int]:

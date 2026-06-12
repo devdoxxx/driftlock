@@ -2,16 +2,23 @@
 Driftlock agent demo — a real multi-step research agent under a mission budget.
 
 This is the wedge in action: a runaway-prone agent (planning → parallel research
-→ synthesis, ~6–8 LLM calls) wrapped in a single budgeted mission that intervenes
-*mid-run* — downgrading the model (or killing the run) before the budget blows.
+→ fact-check → synthesis, ~7 LLM calls) wrapped in a single budgeted mission that
+intervenes *mid-run* — downgrading the model (or killing the run) before the
+budget blows.
 
-Run it against a real API key::
+Works out of the box with no API key (mock mode — simulated calls through the
+full Driftlock pipeline)::
+
+    python examples/agent_demo.py "impact of interest rates on tech stocks"
+
+Or against a real API key::
 
     OPENAI_API_KEY=sk-... python examples/agent_demo.py "impact of interest rates on tech stocks"
 
 Flags::
 
-    --budget 0.03          hard mission budget in USD (default: 0.03 — tight, to show the wedge)
+    --mock                 simulate the LLM calls (default when no OPENAI_API_KEY)
+    --budget 0.03          hard mission budget in USD (default: 0.15 mock / 0.03 real)
     --model gpt-4o         primary model (default: gpt-4o)
     --downgrade-to gpt-4o-mini   cheaper fallback model
     --kill                 use on_exceed="kill" instead of "downgrade"
@@ -27,9 +34,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import sys
+import random
+import threading
+import time
+from types import SimpleNamespace
 
 import driftlock
+import driftlock.client as _dl_client_module
 from driftlock import DriftlockClient, DriftlockConfig, MissionBudgetExceededError
 
 
@@ -83,7 +94,7 @@ def run_research_agent(
     model: str = "gpt-4o",
     verbose: bool = True,
 ) -> str:
-    """Plan → research (parallel) → synthesize. Returns the synthesized answer."""
+    """Plan → research (parallel) → fact-check → synthesize. Returns the brief."""
 
     # 1) Planning — one call to decompose the topic.
     try:
@@ -130,8 +141,21 @@ def run_research_agent(
         _receipt("research (parallel)", client, mission)
         print(f"  └─ {len(findings)} findings gathered")
 
-    # 3) Synthesis — one call to combine findings.
+    # 3) Fact-check — one call to vet the findings before they're combined.
     joined = "\n\n".join(f"- {f}" for f in findings)
+    client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a fact checker. Flag dubious claims, briefly."},
+            {"role": "user", "content": f"Verify these findings on '{topic}':\n{joined}"},
+        ],
+        max_tokens=200,
+        _dl_endpoint="fact_check",
+    )
+    if verbose:
+        _receipt("fact-check", client, mission)
+
+    # 4) Synthesis — one call to combine findings.
     synth = client.chat.completions.create(
         model=model,
         messages=[
@@ -147,33 +171,199 @@ def run_research_agent(
 
 
 # --------------------------------------------------------------------------- #
+# Mock mode — simulated calls through the *full* Driftlock pipeline
+# --------------------------------------------------------------------------- #
+#
+# The MockProvider replaces only the HTTP backend inside DriftlockClient. The
+# mission context, _before_call/_record_call hooks, policy surface, metrics, and
+# SQLite persistence all run for real — the demo output is structurally
+# identical to a real run.
+#
+# The cost profile is engineered against the EWMA projection (alpha=0.3,
+# expected_calls=11) so that with the default $0.15 budget the warning fires
+# during the research wave and the intervention arms right after it — the
+# fact-check call is downgraded (or killed) before it goes out.
+
+# (endpoint, cost_usd, latency_s [None = randomized 0.8–1.2s], prompt_tok, completion_tok)
+_MOCK_PROFILE = [
+    ("plan",       0.0003, 0.150, 120, 60),
+    ("research",   0.0180, None,  420, 230),
+    ("research",   0.0180, None,  410, 215),
+    ("research",   0.0180, None,  450, 240),
+    ("research",   0.0180, None,  430, 225),
+    ("fact_check", 0.0420, 1.100, 640, 180),
+    ("synthesize", 0.0890, 1.800, 920, 330),
+]
+
+# Cost lookup keyed by prompt_tokens — ties each response to its profile cost
+# without any ordering assumptions between parallel calls.
+_MOCK_COST_BY_PTOK = {p: cost for (_, cost, _, p, _) in _MOCK_PROFILE}
+
+# Cheaper model costs ~5.5% of the primary (roughly gpt-4o → gpt-4o-mini).
+_MOCK_MINI_FACTOR = 0.055
+
+_MOCK_DEFAULT_BUDGET = 0.15
+_MOCK_EXPECTED_CALLS = 11  # arms the EWMA guardrail right after the research wave
+
+
+def _mock_topic(kwargs: dict) -> str:
+    for m in reversed(kwargs.get("messages", [])):
+        if m.get("role") == "user":
+            text = str(m.get("content", ""))
+            if "Topic:" in text:
+                return text.split("Topic:", 1)[1].split("\n")[0].strip()
+            return text[:60]
+    return "the topic"
+
+
+def _mock_content(stage: str, kwargs: dict) -> str:
+    topic = _mock_topic(kwargs)
+    if stage == "plan":
+        return (
+            f"Historical precedent and key drivers behind {topic}\n"
+            f"Current data and leading indicators for {topic}\n"
+            f"Sector winners and losers affected by {topic}\n"
+            f"Expert forecasts and contrarian views on {topic}"
+        )
+    if stage == "research":
+        return (
+            "Finding: the relationship is strongly regime-dependent; the last "
+            "three cycles show divergent outcomes depending on starting valuations."
+        )
+    if stage == "fact_check":
+        return "Verified: findings are consistent; one figure adjusted for recency."
+    return (
+        f"In brief, {topic} shows a clear but conditional pattern. The effect is "
+        "strongest when valuations are stretched and weakest mid-cycle. Watch the "
+        "leading indicators rather than the headline number."
+    )
+
+
+class _MockResponse:
+    """Shaped like an OpenAI ChatCompletion as far as the pipeline reads it."""
+
+    def __init__(self, model: str, content: str, prompt_tokens: int, completion_tokens: int):
+        self.model = model
+        self.usage = SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+        self.choices = [
+            SimpleNamespace(
+                index=0,
+                finish_reason="stop",
+                message=SimpleNamespace(content=content, role="assistant"),
+            )
+        ]
+
+
+class MockProvider:
+    """
+    Simulated LLM backend: sleeps for realistic latency and returns canned
+    responses, while everything else in Driftlock runs unmodified.
+    """
+
+    def __init__(self, downgrade_model: str = "gpt-4o-mini", latency_scale: float = 1.0):
+        self._downgrade_model = downgrade_model
+        self._scale = max(0.0, latency_scale)
+        self._i = 0
+        self._lock = threading.Lock()
+        self._orig_estimate = None
+        self.sync_backend = SimpleNamespace(create=self._create)
+        self.async_backend = SimpleNamespace(create=self._acreate)
+
+    def _next(self) -> tuple[str, float, int, int]:
+        with self._lock:
+            idx = min(self._i, len(_MOCK_PROFILE) - 1)
+            self._i += 1
+        stage, _cost, latency, p, c = _MOCK_PROFILE[idx]
+        if latency is None:
+            latency = random.uniform(0.8, 1.2)
+        return stage, latency, p, c
+
+    def _build(self, stage: str, p: int, c: int, kwargs: dict) -> _MockResponse:
+        return _MockResponse(
+            model=kwargs.get("model", "gpt-4o"),
+            content=_mock_content(stage, kwargs),
+            prompt_tokens=p,
+            completion_tokens=c,
+        )
+
+    def _create(self, *args, **kwargs) -> _MockResponse:
+        stage, latency, p, c = self._next()
+        time.sleep(latency * self._scale)
+        return self._build(stage, p, c, kwargs)
+
+    async def _acreate(self, *args, **kwargs) -> _MockResponse:
+        stage, latency, p, c = self._next()
+        await asyncio.sleep(latency * self._scale)
+        return self._build(stage, p, c, kwargs)
+
+    def estimate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        base = _MOCK_COST_BY_PTOK.get(prompt_tokens, 0.001)
+        if model == self._downgrade_model:
+            base *= _MOCK_MINI_FACTOR
+        return round(base, 6)
+
+    def install(self, client: DriftlockClient) -> None:
+        """Swap the client's HTTP backends and pin deterministic costs."""
+        wrapper = client.chat.completions
+        wrapper._sync = self.sync_backend
+        wrapper._async = self.async_backend
+        self._orig_estimate = _dl_client_module.estimate_cost
+        _dl_client_module.estimate_cost = self.estimate_cost
+
+    def uninstall(self) -> None:
+        if self._orig_estimate is not None:
+            _dl_client_module.estimate_cost = self._orig_estimate
+            self._orig_estimate = None
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Driftlock budgeted research agent demo.")
     parser.add_argument("topic", help="Research topic")
-    parser.add_argument("--budget", type=float, default=0.03, help="Mission budget USD")
+    parser.add_argument("--mock", action="store_true",
+                        help="Simulate the LLM calls (default when no OPENAI_API_KEY)")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="Mission budget USD (default: 0.15 mock / 0.03 real)")
     parser.add_argument("--model", default="gpt-4o", help="Primary model")
     parser.add_argument("--downgrade-to", default="gpt-4o-mini", help="Fallback model")
-    parser.add_argument("--expected-calls", type=int, default=8, help="Projection hint")
+    parser.add_argument("--expected-calls", type=int, default=None, help="Projection hint")
     parser.add_argument("--kill", action="store_true", help="on_exceed='kill' instead of 'downgrade'")
     args = parser.parse_args(argv)
 
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        print("Error: set OPENAI_API_KEY to run the demo.", file=sys.stderr)
-        return 1
+    mock = args.mock or not api_key
+    budget = args.budget if args.budget is not None else (
+        _MOCK_DEFAULT_BUDGET if mock else 0.03
+    )
+    expected_calls = args.expected_calls if args.expected_calls is not None else (
+        _MOCK_EXPECTED_CALLS if mock else 8
+    )
 
     client = DriftlockClient(
-        api_key=api_key,
+        api_key=api_key or "sk-mock",
         config=DriftlockConfig(log_level="WARNING", log_json=False),
     )
 
+    provider: MockProvider | None = None
+    if mock:
+        provider = MockProvider(
+            downgrade_model=args.downgrade_to,
+            latency_scale=float(os.environ.get("DRIFTLOCK_MOCK_LATENCY_SCALE", "1")),
+        )
+        provider.install(client)
+
     on_exceed = "kill" if args.kill else "downgrade"
-    print(f"\nDriftlock research agent — topic: {args.topic!r}")
+    tag = " [MOCK]" if mock else ""
+    print(f"\nDriftlock research agent{tag} — topic: {args.topic!r}")
     print(
-        f"  budget=${args.budget:.4f}  on_exceed={on_exceed}  "
+        f"  budget=${budget:.4f}  on_exceed={on_exceed}  "
         f"model={args.model} → {args.downgrade_to}\n"
     )
 
@@ -186,19 +376,23 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     result = None
-    with driftlock.mission(
-        "research_agent",
-        budget_usd=args.budget,
-        expected_calls=args.expected_calls,
-        on_exceed=on_exceed,
-        downgrade_to=args.downgrade_to,
-        on_warning=on_warning,
-    ) as mission:
-        try:
-            result = run_research_agent(args.topic, client, mission, model=args.model)
-        except MissionBudgetExceededError as exc:
-            print(f"\n  🛑 Mission KILLED mid-run: {exc.rule_name}")
-            print(f"     {exc.decision.metadata}\n")
+    try:
+        with driftlock.mission(
+            "research_agent",
+            budget_usd=budget,
+            expected_calls=expected_calls,
+            on_exceed=on_exceed,
+            downgrade_to=args.downgrade_to,
+            on_warning=on_warning,
+        ) as mission:
+            try:
+                result = run_research_agent(args.topic, client, mission, model=args.model)
+            except MissionBudgetExceededError as exc:
+                print(f"\n  🛑 Mission KILLED mid-run: {exc.rule_name}")
+                print(f"     {exc.decision.metadata}\n")
+    finally:
+        if provider is not None:
+            provider.uninstall()
 
     print("\n" + "=" * 70)
     print(

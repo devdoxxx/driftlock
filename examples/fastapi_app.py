@@ -1,17 +1,23 @@
 """
 Example FastAPI application showing how to integrate DriftlockClient
-with optimization, caching, and automatic per-request tag injection.
+with optimization, caching, and automatic per-request tag injection — plus the
+mission dashboard (single-page, zero frontend tooling) served at /.
 
 Run with:
     uvicorn examples.fastapi_app:app --reload
+    # open http://localhost:8000
 
-Set OPENAI_API_KEY in your environment before starting.
+Set OPENAI_API_KEY in your environment before starting. Run the agent demo
+first (`python examples/agent_demo.py "any topic"` — mock mode needs no key)
+so the dashboard has mission data to show.
 """
 
 import os
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -208,3 +214,21 @@ async def metrics_summary():
 async def burn_rate(hours: int = 24):
     """Hourly spend + call count over the last N hours."""
     return {"hours": hours, "buckets": client._storage.hourly_burn_rate(hours=hours)}
+
+
+@app.get("/metrics/top-endpoints")
+async def top_endpoints(limit: int = 5):
+    """Top endpoints by spend: calls, total/avg cost, avg latency."""
+    return {"endpoints": client._storage.top_endpoints(limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — single-page frontend over the routes above. Vanilla HTML/CSS/JS,
+# no build step; just open http://localhost:8000.
+# ---------------------------------------------------------------------------
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+@app.get("/", include_in_schema=False)
+async def dashboard():
+    return FileResponse(_STATIC_DIR / "dashboard.html", media_type="text/html")

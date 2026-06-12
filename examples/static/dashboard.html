@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Driftlock — Mission Control</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2129;
+    --border: #2d333b;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --text-faint: #6e7681;
+    --green: #3fb950;
+    --amber: #d29922;
+    --red: #f85149;
+    --blue: #58a6ff;
+    --gray: #6e7681;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    padding: 20px;
+    min-height: 100vh;
+  }
+  .num { font-family: var(--mono); }
+
+  /* ---- Header bar ---- */
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.3px; }
+  header h1 span { color: var(--text-faint); font-weight: 400; }
+  #refresh-note { color: var(--text-faint); font-size: 12px; margin-left: auto; }
+
+  .statbar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .stat .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; }
+  .stat .value { font-family: var(--mono); font-size: 22px; margin-top: 4px; }
+  .stat .sub { color: var(--text-faint); font-size: 11px; margin-top: 2px; }
+
+  /* ---- Layout ---- */
+  .layout { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .panel h2 {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-dim);
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .right-col { display: flex; flex-direction: column; gap: 14px; }
+
+  /* ---- Mission feed ---- */
+  .mission-row {
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .mission-row:hover { background: var(--panel-2); }
+  .mission-row:last-child { border-bottom: none; }
+  .mission-head {
+    display: grid;
+    grid-template-columns: minmax(110px, 1.4fr) 76px minmax(120px, 1.2fr) 52px 70px 64px;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+  .m-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m-name .mid { color: var(--text-faint); font-size: 11px; font-family: var(--mono); display: block; }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    text-align: center;
+  }
+  .badge.completed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge.degraded  { background: rgba(210,153,34,0.15); color: var(--amber); }
+  .badge.killed    { background: rgba(248,81,73,0.15);  color: var(--red); }
+  .badge.failed    { background: rgba(110,118,129,0.2); color: var(--gray); }
+  .badge.running   { background: rgba(88,166,255,0.15); color: var(--blue); }
+
+  .spendbar { display: flex; flex-direction: column; gap: 3px; }
+  .spendbar .nums { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+  .track { height: 5px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; border-radius: 3px; background: var(--green); }
+  .fill.warn { background: var(--amber); }
+  .fill.over { background: var(--red); }
+
+  .m-meta { font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: right; }
+
+  /* ---- Expanded call graph ---- */
+  .mission-detail {
+    background: var(--panel-2);
+    border-top: 1px solid var(--border);
+    padding: 10px 14px 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .call-line { display: flex; gap: 12px; padding: 3px 0; color: var(--text-dim); flex-wrap: wrap; }
+  .call-line .ep { color: var(--text); min-width: 110px; }
+  .call-line .model { color: var(--blue); min-width: 110px; }
+  .intervention-line { padding: 5px 8px; margin: 6px 0 2px; border-radius: 5px; font-size: 12px; }
+  .intervention-line.downgrade { background: rgba(210,153,34,0.12); color: var(--amber); }
+  .intervention-line.kill, .intervention-line.pause { background: rgba(248,81,73,0.12); color: var(--red); }
+  .detail-loading { color: var(--text-faint); padding: 4px 0; }
+
+  /* ---- Burn rate chart ---- */
+  #burn-chart-wrap { padding: 12px 14px; }
+  #burn-chart { width: 100%; height: 150px; display: block; }
+  .bar { fill: #2f81f7; opacity: 0.55; }
+  .bar.current { fill: var(--blue); opacity: 1; }
+  .bar:hover { opacity: 1; }
+  .axis-label { fill: var(--text-faint); font-size: 9px; font-family: var(--mono); }
+
+  /* ---- Top endpoints ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { padding: 8px 14px; text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th {
+    color: var(--text-faint);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
+    border-bottom: 1px solid var(--border);
+  }
+  td { border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text-dim); }
+  td:first-child { font-family: var(--sans); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+
+  /* ---- Empty / loading states ---- */
+  .empty {
+    padding: 28px 16px;
+    text-align: center;
+    color: var(--text-faint);
+    font-size: 13px;
+    line-height: 1.7;
+  }
+  .empty code {
+    font-family: var(--mono);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    color: var(--text-dim);
+  }
+  .loading { padding: 20px; text-align: center; color: var(--text-faint); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Driftlock <span>/ mission control</span></h1>
+  <div id="refresh-note">refreshing…</div>
+</header>
+
+<div class="statbar">
+  <div class="stat"><div class="label">Spend today</div><div class="value" id="stat-today">—</div><div class="sub" id="stat-today-sub"></div></div>
+  <div class="stat"><div class="label">Spend this month</div><div class="value" id="stat-month">—</div><div class="sub" id="stat-month-sub"></div></div>
+  <div class="stat"><div class="label">Active missions</div><div class="value" id="stat-active">—</div><div class="sub">status = running</div></div>
+  <div class="stat"><div class="label">Calls last hour</div><div class="value" id="stat-hour">—</div><div class="sub" id="stat-hour-sub"></div></div>
+</div>
+
+<div class="layout">
+  <div class="panel" id="missions-panel">
+    <h2>Missions</h2>
+    <div id="mission-feed"><div class="loading">Loading missions…</div></div>
+  </div>
+
+  <div class="right-col">
+    <div class="panel">
+      <h2>Burn rate — last 24h</h2>
+      <div id="burn-chart-wrap"><div class="loading">Loading…</div></div>
+    </div>
+    <div class="panel">
+      <h2>Top endpoints</h2>
+      <div id="endpoints-wrap"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const REFRESH_MS = 10_000;
+let expandedMissionId = null;
+const detailCache = {};
+
+// ------------------------------------------------------------------ //
+// Helpers
+// ------------------------------------------------------------------ //
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+
+function usd(v, digits = 4) {
+  if (v === null || v === undefined) return "—";
+  return "$" + Number(v).toFixed(digits);
+}
+
+function fmtDuration(start, end) {
+  if (!start) return "—";
+  const s = new Date(start), e = end ? new Date(end) : new Date();
+  const secs = Math.max(0, (e - s) / 1000);
+  if (secs < 60) return secs.toFixed(1) + "s";
+  if (secs < 3600) return (secs / 60).toFixed(1) + "m";
+  return (secs / 3600).toFixed(1) + "h";
+}
+
+function fmtWhen(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  const today = new Date().toDateString() === d.toDateString();
+  return today
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json();
+}
+
+// ------------------------------------------------------------------ //
+// Header stats
+// ------------------------------------------------------------------ //
+function renderStats(summary, missions, burn) {
+  const today = summary.today || {}, month = summary.this_month || {};
+  document.getElementById("stat-today").textContent = usd(today.spend_usd ?? 0);
+  document.getElementById("stat-today-sub").textContent =
+    `${today.calls ?? 0} calls · ${today.missions ?? 0} missions`;
+  document.getElementById("stat-month").textContent = usd(month.spend_usd ?? 0, 2);
+  document.getElementById("stat-month-sub").textContent =
+    `${month.calls ?? 0} calls · ${month.missions ?? 0} missions`;
+
+  const active = (missions || []).filter(m => m.status === "running").length;
+  document.getElementById("stat-active").textContent = active;
+
+  // Calls in the last hour = the burn-rate bucket matching the current UTC hour.
+  const hourKey = new Date().toISOString().slice(0, 13);
+  const bucket = (burn.buckets || []).find(b => b.hour === hourKey);
+  document.getElementById("stat-hour").textContent = bucket ? bucket.calls : 0;
+  document.getElementById("stat-hour-sub").textContent =
+    bucket ? usd(bucket.cost_usd) + " spent" : "no calls yet";
+}
+
+// ------------------------------------------------------------------ //
+// Mission feed
+// ------------------------------------------------------------------ //
+function spendBar(spent, budget) {
+  if (budget === null || budget === undefined || budget <= 0) {
+    return `<div class="spendbar"><span class="nums">${usd(spent)}</span></div>`;
+  }
+  const frac = Math.min(1, spent / budget);
+  const cls = frac >= 1 ? "over" : frac >= 0.8 ? "warn" : "";
+  return `
+    <div class="spendbar">
+      <span class="nums">${usd(spent)} / ${usd(budget, 2)}</span>
+      <div class="track"><div class="fill ${cls}" style="width:${(frac * 100).toFixed(1)}%"></div></div>
+    </div>`;
+}
+
+function renderMissions(missions) {
+  const feed = document.getElementById("mission-feed");
+  if (!missions || missions.length === 0) {
+    feed.innerHTML = `
+      <div class="empty">
+        No missions yet.<br>
+        Run the demo agent (no API key needed):<br>
+        <code>python examples/agent_demo.py "your topic"</code>
+      </div>`;
+    return;
+  }
+  feed.innerHTML = missions.map(m => `
+    <div class="mission-row" data-mid="${esc(m.mission_id)}">
+      <div class="mission-head">
+        <div class="m-name">
+          ${esc(m.name || "(unnamed)")}
+          <span class="mid">${esc(m.mission_id)}</span>
+        </div>
+        <span class="badge ${esc(m.status)}">${esc(m.status)}</span>
+        ${spendBar(m.total_cost_usd, m.budget_usd)}
+        <span class="m-meta">${m.calls}c</span>
+        <span class="m-meta">${fmtDuration(m.started_at, m.ended_at)}</span>
+        <span class="m-meta">${fmtWhen(m.started_at)}</span>
+      </div>
+      <div class="mission-detail" id="detail-${esc(m.mission_id)}" style="display:none"></div>
+    </div>`).join("");
+
+  feed.querySelectorAll(".mission-row").forEach(row => {
+    row.addEventListener("click", () => toggleDetail(row.dataset.mid));
+  });
+  if (expandedMissionId) showDetail(expandedMissionId);  // keep expansion across refresh
+}
+
+function toggleDetail(mid) {
+  if (expandedMissionId === mid) {
+    expandedMissionId = null;
+    const el = document.getElementById("detail-" + mid);
+    if (el) el.style.display = "none";
+    return;
+  }
+  if (expandedMissionId) {
+    const prev = document.getElementById("detail-" + expandedMissionId);
+    if (prev) prev.style.display = "none";
+  }
+  expandedMissionId = mid;
+  showDetail(mid);
+}
+
+async function showDetail(mid) {
+  const el = document.getElementById("detail-" + mid);
+  if (!el) return;
+  el.style.display = "block";
+  if (!detailCache[mid]) el.innerHTML = `<div class="detail-loading">Loading call graph…</div>`;
+  try {
+    const stats = await getJSON("/missions/" + encodeURIComponent(mid));
+    detailCache[mid] = stats;
+    el.innerHTML = renderDetail(stats);
+  } catch (e) {
+    el.innerHTML = `<div class="detail-loading">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+
+function renderCallNode(node, depth) {
+  const pad = 8 + depth * 22;
+  const latency = node.latency_ms != null ? Math.round(node.latency_ms) + "ms" : "—";
+  let html = `
+    <div class="call-line" style="padding-left:${pad}px">
+      <span class="ep">${esc(node.endpoint || "call")}</span>
+      <span class="model">${esc(node.model || "?")}</span>
+      <span>${usd(node.cost_usd)}</span>
+      <span>${latency}</span>
+    </div>`;
+  for (const child of node.children || []) html += renderCallNode(child, depth + 1);
+  return html;
+}
+
+function renderDetail(stats) {
+  let html = "";
+  for (const node of stats.call_graph || []) html += renderCallNode(node, 0);
+  for (const ev of stats.interventions || []) {
+    const cls = ev.action === "downgrade" ? "downgrade" : "kill";
+    html += `<div class="intervention-line ${cls}">⚡ ${esc(ev.action)} — ${esc(ev.reason || "")}</div>`;
+  }
+  if (!html) html = `<div class="detail-loading">No calls recorded for this mission.</div>`;
+  html += `
+    <div class="call-line" style="margin-top:6px; color:var(--text-faint)">
+      <span>total ${usd(stats.total_cost_usd)}</span>
+      <span>direct ${usd(stats.direct_spend)}</span>
+      <span>nested ${usd(stats.nested_spend)}</span>
+      <span>${stats.total_tokens ?? 0} tokens</span>
+    </div>`;
+  return html;
+}
+
+// ------------------------------------------------------------------ //
+// Burn rate chart (pure SVG, no library)
+// ------------------------------------------------------------------ //
+function renderBurnChart(burn) {
+  const wrap = document.getElementById("burn-chart-wrap");
+  const buckets = burn.buckets || [];
+  if (buckets.length === 0) {
+    wrap.innerHTML = `<div class="empty">No spend in the last 24 hours.<br>
+      Run <code>python examples/agent_demo.py "topic"</code> to generate data.</div>`;
+    return;
+  }
+
+  // Build a full 24-slot series (oldest -> newest), filling missing hours with 0.
+  const byHour = Object.fromEntries(buckets.map(b => [b.hour, b]));
+  const slots = [];
+  const now = new Date();
+  for (let i = 23; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 3600_000);
+    const key = d.toISOString().slice(0, 13);
+    slots.push({ key, label: key.slice(11) + ":00", ...byHour[key] });
+  }
+  const currentKey = now.toISOString().slice(0, 13);
+  const max = Math.max(...slots.map(s => s.cost_usd || 0), 1e-9);
+
+  const W = 460, H = 150, padB = 16, padT = 14;
+  const bw = W / slots.length;
+  let bars = "", labels = "";
+  slots.forEach((s, i) => {
+    const v = s.cost_usd || 0;
+    const h = v > 0 ? Math.max(2, (v / max) * (H - padB - padT)) : 0;
+    const x = i * bw + 1.5, y = H - padB - h;
+    const cls = s.key === currentKey ? "bar current" : "bar";
+    bars += `<rect class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}"
+      width="${(bw - 3).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5">
+      <title>${s.label} UTC — ${usd(v)} (${s.calls || 0} calls)</title></rect>`;
+    if (i % 6 === 0 || s.key === currentKey) {
+      labels += `<text class="axis-label" x="${(x + bw / 2).toFixed(1)}" y="${H - 4}"
+        text-anchor="middle">${s.key === currentKey ? "now" : s.label}</text>`;
+    }
+  });
+  const peak = `<text class="axis-label" x="2" y="${padT - 4}">peak ${usd(max)}</text>`;
+  wrap.innerHTML = `<svg id="burn-chart" viewBox="0 0 ${W} ${H}"
+    preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">${peak}${bars}${labels}</svg>`;
+}
+
+// ------------------------------------------------------------------ //
+// Top endpoints
+// ------------------------------------------------------------------ //
+function renderEndpoints(data) {
+  const wrap = document.getElementById("endpoints-wrap");
+  const rows = data.endpoints || [];
+  if (rows.length === 0) {
+    wrap.innerHTML = `<div class="empty">No tracked calls yet.</div>`;
+    return;
+  }
+  wrap.innerHTML = `
+    <table>
+      <thead><tr><th>endpoint</th><th>calls</th><th>total</th><th>avg</th><th>latency</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td>${esc(r.endpoint)}</td>
+          <td>${r.calls}</td>
+          <td>${usd(r.total_cost_usd)}</td>
+          <td>${usd(r.avg_cost_usd)}</td>
+          <td>${Math.round(r.avg_latency_ms)}ms</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+// ------------------------------------------------------------------ //
+// Refresh loop
+// ------------------------------------------------------------------ //
+async function refresh() {
+  const note = document.getElementById("refresh-note");
+  note.textContent = "refreshing…";
+  try {
+    const [summary, missionsBody, burn, endpoints] = await Promise.all([
+      getJSON("/metrics/summary"),
+      getJSON("/missions?limit=25"),
+      getJSON("/metrics/burn-rate?hours=24"),
+      getJSON("/metrics/top-endpoints?limit=5"),
+    ]);
+    renderStats(summary, missionsBody.missions, burn);
+    renderMissions(missionsBody.missions);
+    renderBurnChart(burn);
+    renderEndpoints(endpoints);
+    note.textContent = "updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch (e) {
+    note.textContent = "fetch failed — is the server running?";
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

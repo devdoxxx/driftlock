@@ -95,8 +95,72 @@ def test_agent_kill_halts_run(demo_client):
     assert m.status == "killed"
 
 
-def test_demo_main_requires_api_key(monkeypatch, capsys):
+# ------------------------------------------------------------------ #
+# Mock mode — full pipeline, no API key
+# ------------------------------------------------------------------ #
+
+@pytest.fixture
+def mock_env(tmp_path, monkeypatch):
+    """Isolated cwd (demo writes ./driftlock.sqlite) + zero simulated latency."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DRIFTLOCK_MOCK_LATENCY_SCALE", "0")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    return tmp_path
+
+
+def _latest_mission(tmp_path):
+    from driftlock.storage import SQLiteStorage
+    storage = SQLiteStorage(str(tmp_path / "driftlock.sqlite"))
+    rows = storage.list_missions(limit=1)
+    return rows[0] if rows else None
+
+
+def test_mock_is_default_without_api_key(mock_env, capsys):
     rc = agent_demo.main(["some topic"])
-    assert rc == 1
-    assert "OPENAI_API_KEY" in capsys.readouterr().err
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[MOCK]" in out
+
+
+def test_mock_downgrade_run_end_to_end(mock_env, capsys):
+    rc = agent_demo.main(["interest rates", "--mock"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "WARNING" in out                      # soft warning fired
+    assert "status=degraded" in out              # intervention armed mid-run
+    row = _latest_mission(mock_env)
+    assert row["status"] == "degraded"
+    assert row["calls"] == 7                     # plan + 4 research + fact-check + synth
+    assert row["total_cost_usd"] == pytest.approx(0.0795, abs=2e-3)
+
+
+def test_mock_kill_halts_at_fact_check(mock_env, capsys):
+    rc = agent_demo.main(["interest rates", "--mock", "--kill"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "KILLED" in out
+    row = _latest_mission(mock_env)
+    assert row["status"] == "killed"
+    assert row["calls"] == 5                     # halted before fact-check (call 6)
+
+
+def test_mock_flag_with_api_key_present(mock_env, monkeypatch, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-key-unused")
+    rc = agent_demo.main(["topic", "--mock"])
+    assert rc == 0
+    assert "[MOCK]" in capsys.readouterr().out
+
+
+def test_mock_restores_estimate_cost(mock_env):
+    import driftlock.client as dl_client
+    original = dl_client.estimate_cost
+    agent_demo.main(["topic", "--mock"])
+    assert dl_client.estimate_cost is original
+
+
+def test_mock_provider_cost_schedule():
+    provider = agent_demo.MockProvider(downgrade_model="gpt-4o-mini")
+    # Primary-model costs match the profile; downgraded calls are ~5.5%.
+    assert provider.estimate_cost("gpt-4o", 120, 60) == pytest.approx(0.0003)
+    assert provider.estimate_cost("gpt-4o", 640, 180) == pytest.approx(0.0420)
+    assert provider.estimate_cost("gpt-4o-mini", 640, 180) == pytest.approx(0.0420 * 0.055, abs=1e-6)

@@ -40,7 +40,9 @@ def _populate(db_path, monkeypatch):
         with driftlock.mission("dash", budget_usd=10.0, expected_calls=5, mission_id="dash1"):
             for _ in range(3):
                 c.chat.completions.create(
-                    model="gpt-4o", messages=[{"role": "user", "content": "hi"}]
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": "hi"}],
+                    _dl_endpoint="research",
                 )
 
 
@@ -111,3 +113,33 @@ def test_burn_rate(api):
     assert body["hours"] == 24
     assert len(body["buckets"]) >= 1
     assert sum(b["calls"] for b in body["buckets"]) >= 3
+
+
+def test_top_endpoints(api):
+    r = api.get("/metrics/top-endpoints", params={"limit": 5})
+    assert r.status_code == 200
+    rows = r.json()["endpoints"]
+    assert rows, "expected at least one endpoint row"
+    top = rows[0]
+    assert top["endpoint"] == "research"
+    assert top["calls"] == 3
+    assert top["total_cost_usd"] == pytest.approx(0.3)
+    assert "avg_cost_usd" in top and "avg_latency_ms" in top
+
+
+def test_dashboard_served_at_root(api):
+    r = api.get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    body = r.text
+    assert "Driftlock" in body
+    assert "/metrics/burn-rate" in body          # frontend wired to the data API
+    assert "mission-feed" in body
+
+
+def test_call_graph_nodes_carry_dashboard_fields(api):
+    r = api.get("/missions/dash1/calls")
+    assert r.status_code == 200
+    node = r.json()["call_graph"][0]
+    assert node["endpoint"] == "research"
+    assert "latency_ms" in node and "timestamp" in node

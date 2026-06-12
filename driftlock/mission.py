@@ -646,6 +646,9 @@ def _build_call_tree(calls: list[dict]) -> list[dict]:
             "parent_call_id": c.get("parent_call_id"),
             "model": c.get("model"),
             "cost_usd": c.get("estimated_cost_usd", c.get("cost_usd")),
+            "endpoint": c.get("endpoint"),
+            "latency_ms": c.get("latency_ms"),
+            "timestamp": c.get("timestamp"),
             "children": [],
         }
     roots: list[dict] = []
