@@ -13,7 +13,7 @@ pip install driftlock
 No API key needed — this runs the full pipeline (mission, guardrails, interventions, SQLite) with simulated LLM calls:
 
 ```bash
-git clone https://github.com/maddox-214/driftlock && cd driftlock
+git clone https://github.com/devdoxxx/driftlock && cd driftlock
 pip install -e .
 python examples/agent_demo.py "impact of interest rates on tech stocks"
 ```
