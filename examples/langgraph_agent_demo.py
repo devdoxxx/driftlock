@@ -1,4 +1,13 @@
 """
+What:     A ReAct-style LangGraph research agent (planner → parallel researchers →
+          synthesizer → critic loop) governed by a mission, with per-node spend
+          attribution and mid-graph downgrade/kill.
+Requires: pip install "driftlock[langgraph]"  +  OPENAI_API_KEY
+Run:      OPENAI_API_KEY=sk-... python examples/langgraph_agent_demo.py "impact of interest rates on tech stocks"
+          OPENAI_API_KEY=sk-... python examples/langgraph_agent_demo.py "..." --kill
+
+----
+
 Driftlock + LangGraph demo — a ReAct-style research agent with a critic loop,
 governed by a mission budget.
 

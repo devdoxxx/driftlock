@@ -1,4 +1,12 @@
 """
+What:     A multi-step research agent (plan → parallel research → fact-check →
+          synthesis, ~7 calls) under a mission budget that intervenes mid-run.
+Requires: Nothing — runs in mock mode by default. Set OPENAI_API_KEY for a real run.
+Run:      python examples/agent_demo.py "impact of interest rates on tech stocks"
+          python examples/agent_demo.py "your topic" --kill     # hard stop instead of downgrade
+
+----
+
 Driftlock agent demo — a real multi-step research agent under a mission budget.
 
 This is the wedge in action: a runaway-prone agent (planning → parallel research

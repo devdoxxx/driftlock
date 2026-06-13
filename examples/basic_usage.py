@@ -1,9 +1,8 @@
 """
-Minimal example — no framework needed.
-Shows how Driftlock wraps the OpenAI client with zero boilerplate.
-
-Run:
-    OPENAI_API_KEY=sk-... python examples/basic_usage.py
+What:     The smallest possible Driftlock integration — wrap the OpenAI client,
+          make one call, read aggregated cost/token stats. No framework needed.
+Requires: OPENAI_API_KEY (makes one real ~$0.00001 call to gpt-4o-mini).
+Run:      OPENAI_API_KEY=sk-... python examples/basic_usage.py
 """
 
 import json

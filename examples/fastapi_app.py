@@ -1,14 +1,11 @@
 """
-Example FastAPI application showing how to integrate DriftlockClient
-with optimization, caching, and automatic per-request tag injection — plus the
-mission dashboard (single-page, zero frontend tooling) served at /.
+What:     FastAPI integration (middleware tagging, optimization, cache) plus the
+          single-page mission dashboard + JSON data API served at /.
+Requires: pip install "driftlock[fastapi]". OPENAI_API_KEY only for the /chat
+          and /summarise routes; the dashboard itself reads existing telemetry.
+Run:      uvicorn examples.fastapi_app:app --reload   # then open http://localhost:8000
 
-Run with:
-    uvicorn examples.fastapi_app:app --reload
-    # open http://localhost:8000
-
-Set OPENAI_API_KEY in your environment before starting. Run the agent demo
-first (`python examples/agent_demo.py "any topic"` — mock mode needs no key)
+Tip: run `python examples/agent_demo.py "any topic"` first (mock mode, no key)
 so the dashboard has mission data to show.
 """
 

@@ -1,17 +1,9 @@
 """
-Driftlock + LangChain demo.
-
-Shows the ``DriftlockCallbackHandler`` wired into a LangChain ChatOpenAI model so
-that LLM calls made by a LangChain chain/agent are governed by a Driftlock
-mission budget — with mid-run kill/downgrade just like the native integration.
-
-Requires the optional extra::
-
-    pip install "driftlock[langchain]" langchain-openai
-
-Run::
-
-    OPENAI_API_KEY=sk-... python examples/langchain_agent_demo.py "renewable energy storage"
+What:     A LangChain ChatOpenAI model governed by a Driftlock mission via
+          DriftlockCallbackHandler — mid-run kill/downgrade, no DriftlockClient
+          on the call path.
+Requires: pip install "driftlock[langchain]" langchain-openai  +  OPENAI_API_KEY
+Run:      OPENAI_API_KEY=sk-... python examples/langchain_agent_demo.py "renewable energy storage"
 """
 
 from __future__ import annotations

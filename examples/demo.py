@@ -1,12 +1,8 @@
 """
-Driftlock end-to-end demo — no real OpenAI API key required.
-
-Patches the OpenAI client with a realistic fake so you can run this
-locally and see exactly what Driftlock does: logs, optimization reports,
-cache hits, context tags, and aggregated stats.
-
-Run:
-    python examples/demo.py
+What:     End-to-end feature tour — tracking, optimization, budget guardrails,
+          cache, and context tags — using a patched fake OpenAI backend.
+Requires: Nothing. No API key, no network calls, no cost.
+Run:      python examples/demo.py
 """
 
 import json
