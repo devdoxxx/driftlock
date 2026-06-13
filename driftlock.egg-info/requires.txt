@@ -13,3 +13,10 @@ ruff>=0.4
 [fastapi]
 fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
+
+[langchain]
+langchain>=0.2.0
+
+[langgraph]
+langgraph>=0.2.0
+langchain-openai>=0.1.0
