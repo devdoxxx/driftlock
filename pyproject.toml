@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/maddox-214/driftlock"
-Repository = "https://github.com/maddox-214/driftlock"
-"Bug Tracker" = "https://github.com/maddox-214/driftlock/issues"
+Homepage = "https://github.com/devdoxxx/driftlock"
+Repository = "https://github.com/devdoxxx/driftlock"
+"Bug Tracker" = "https://github.com/devdoxxx/driftlock/issues"
 
 [project.optional-dependencies]
 anthropic = ["anthropic>=0.30.0"]

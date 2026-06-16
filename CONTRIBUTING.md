@@ -6,7 +6,7 @@ need to get productive in a few minutes.
 ## Dev environment
 
 ```bash
-git clone https://github.com/maddox-214/driftlock && cd driftlock
+git clone https://github.com/devdoxxx/driftlock && cd driftlock
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"      # editable install + pytest, ruff, etc.
 ```
