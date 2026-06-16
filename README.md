@@ -67,7 +67,7 @@ client = DriftlockClient(api_key="sk-...", policy=policy)   # raises once $100/m
 
 ### Mission budgets
 
-A mission wraps a whole agent run and intervenes mid-execution when projected spend crosses the budget.
+A mission wraps a whole agent run and intervenes mid execution when projected spend crosses the budget.
 
 ```python
 import driftlock
